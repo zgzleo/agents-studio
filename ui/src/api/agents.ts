@@ -84,6 +84,7 @@ export interface AgentHireResponse {
 }
 
 export interface AgentPermissionUpdate {
+  codexProjectTaskAutoApprove?: boolean;
   canCreateAgents: boolean;
   canCreateSkills: boolean;
   canAssignTasks: boolean;

@@ -61,7 +61,14 @@ export async function prepareAgentConfiguration(db: Db, existing: AgentConfigura
   }
   const normalizedPatch = { ...data } as AgentConfigurationPatch;
   if (data.permissions !== undefined) {
-    normalizedPatch.permissions = normalizeAgentPermissions(data.permissions);
+    // Imports and generic configuration writes cannot transfer this owner opt-in.
+    // Only the owner-checked permissions route may change its stored value.
+    const permissions: Record<string, unknown> = isPlainRecord(data.permissions) ? { ...data.permissions } : {};
+    delete permissions.codexProjectTaskAutoApprove;
+    if (isPlainRecord(existing.permissions) && Object.hasOwn(existing.permissions, "codexProjectTaskAutoApprove")) {
+      permissions.codexProjectTaskAutoApprove = existing.permissions.codexProjectTaskAutoApprove;
+    }
+    normalizedPatch.permissions = normalizeAgentPermissions(permissions);
   }
   if (
     Object.prototype.hasOwnProperty.call(normalizedPatch, "adapterConfig") &&

@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
+import type { AdapterRuntimeMcpServer, AdapterExecutionContext } from "@paperclipai/adapter-utils";
 import type { SandboxManagedRuntimeAssetProvision } from "@paperclipai/adapter-utils/sandbox-managed-runtime";
 import { shellQuote } from "@paperclipai/adapter-utils/ssh";
 import { buildCodexAuthInboundProvision, CODEX_AUTH_MERGE_EXTRACT_SCRIPT_NAME } from "./codex-auth-merge-scripts.js";
@@ -68,10 +68,29 @@ done`;
 }
 
 export type ManagedCodexMcpGateway = {
+  codexProjectTaskAutoApprove?: boolean;
   name: string;
   endpointPath: string;
   bearerToken: string;
 };
+
+/** Only the control plane's internal descriptor can carry the Board opt-in.
+ * Context gateways and adapterConfig never supply this policy. */
+export function managedCodexMcpGatewaysFromRuntime(
+  servers: AdapterRuntimeMcpServer[],
+  apiBaseUrl: string,
+): ManagedCodexMcpGateway[] {
+  if (servers.length === 0) return [];
+  // Match the control plane's configuredPaperclipApiBaseUrl normalization.
+  const baseUrl = apiBaseUrl.replace(/\/+$/, "").replace(/\/api$/, "");
+  const projectEndpoint = `${baseUrl}/api/mcp/project-tools`;
+  return servers.map(server => ({
+    name: server.name, endpointPath: server.url, bearerToken: server.token,
+    ...(server.codexProjectTaskAutoApprove === true
+      && server.connectionId === "paperclip-project-tools"
+      && server.url === projectEndpoint ? { codexProjectTaskAutoApprove: true } : {}),
+  }));
+}
 
 export function mergeManagedCodexMcpGateways(
   primary: ManagedCodexMcpGateway[],
@@ -358,6 +377,9 @@ function buildManagedMcpBlock(input: {
       `url = ${tomlString(url)}`,
       `http_headers = { Authorization = ${tomlString(`Bearer ${gateway.bearerToken}`)} }`,
     );
+    if (gateway.codexProjectTaskAutoApprove === true) {
+      lines.push("", `[mcp_servers.${tomlString(managedName)}.tools.create_task]`, 'approval_mode = "approve"');
+    }
   });
   lines.push(MANAGED_MCP_BLOCK_END);
   return { block: lines.join("\n"), warnings };

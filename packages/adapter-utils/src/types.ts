@@ -193,6 +193,8 @@ export interface AdapterInvocationMeta {
 }
 
 export interface AdapterRuntimeMcpServer {
+  /** Control-plane-only opt-in for the internal Paperclip project create_task tool. */
+  codexProjectTaskAutoApprove?: boolean;
   name: string;
   url: string;
   token: string;

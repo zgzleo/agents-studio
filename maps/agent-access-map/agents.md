@@ -161,6 +161,18 @@ lifecycle mutation shortcut. See [the format](../../doc/agent-configuration-yaml
 
 Capability ID: `agents/instructions`.
 
+The optional `codexProjectTaskAutoApprove` field on
+`PATCH /api/agents/{id}/permissions` is company-owner-only, including revocation (the existing local implicit Board
+and instance-admin owner semantics apply).
+It defaults off and cannot be injected through create/hire permissions;
+generic configuration/import updates preserve the existing value; CEO
+agent keys cannot set it. Company management permission and activity logging
+still apply. Only the control plane's internal project-tool descriptor receives
+it; legacy Codex applies it to `create_task` client confirmation only. Native
+Runner policies and server-side operation authorization are unchanged.
+See [the operational contract](../../doc/DEVELOPING.md#legacy-codex-project-task-confirmation).
+Source/fixture coverage does not prove a live model tool call.
+
 Review: `baseline`.
 
 API: `present` — representative operation IDs:

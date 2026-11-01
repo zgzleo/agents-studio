@@ -114,3 +114,15 @@ describe("agent permissions service", () => {
     }).canCreateSkills).toBe(false);
   });
 });
+
+
+describe("Codex project confirmation permission", () => {
+  it("defaults off and refuses hiring-time injection", () => {
+    expect(normalizeAgentPermissions({}).codexProjectTaskAutoApprove).not.toBe(true);
+    expect(normalizeAgentPermissions({ codexProjectTaskAutoApprove: "true" }).codexProjectTaskAutoApprove).toBe(false);
+    expect(normalizeAgentPermissions({ codexProjectTaskAutoApprove: true }, { context: "create" }).codexProjectTaskAutoApprove).toBe(false);
+    expect(agentPermissionsSchema.safeParse({ codexProjectTaskAutoApprove: true }).success).toBe(false);
+    expect(updateAgentPermissionsSchema.safeParse({ canCreateAgents: false, canAssignTasks: false, codexProjectTaskAutoApprove: "true" }).success).toBe(false);
+    expect(updateAgentPermissionsSchema.parse({ canCreateAgents: false, canAssignTasks: false, codexProjectTaskAutoApprove: true }).codexProjectTaskAutoApprove).toBe(true);
+  });
+});

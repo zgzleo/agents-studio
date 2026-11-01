@@ -19,6 +19,8 @@ import type { AgentOrgChainHealth } from "../agent-eligibility.js";
 import type { AgentApiKeyScope } from "../validators/agent.js";
 
 export interface AgentPermissions extends Record<string, unknown> {
+  /** Board opt-in for Codex confirmation of the internal project create_task tool only. */
+  codexProjectTaskAutoApprove?: boolean;
   canCreateAgents: boolean;
   canCreateSkills?: boolean;
   trustPreset?: TrustPreset;

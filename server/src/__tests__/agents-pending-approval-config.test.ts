@@ -1,7 +1,7 @@
 import { createAgentLifecycle } from "../services/agent-lifecycle.js";
 import { randomUUID } from "node:crypto";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { eq, sql } from "drizzle-orm";
 import {
   agents,
   approvals,
@@ -86,6 +86,48 @@ describeEmbeddedPostgres("pending approval agent config integrity", () => {
       const saved = await service.getById(agent.id);
       expect(saved?.adapterType).toBe(agent.adapterType);
       expect(saved?.adapterConfig).toEqual(agent.adapterConfig);
+    }
+  });
+
+  it("cannot grant or revoke the Codex owner opt-in through generic/import-style configuration", async () => {
+    const companyId = await seedCompany();
+    const [agent] = await db.insert(agents).values({ companyId, name: "Import policy fixture", adapterType: "process", permissions: { canCreateAgents: false } }).returning();
+    const service = agentService(db);
+    await service.update(agent.id, { permissions: { canCreateAgents: false, codexProjectTaskAutoApprove: true } });
+    expect((await service.getById(agent.id))?.permissions.codexProjectTaskAutoApprove).not.toBe(true);
+    await service.updatePermissions(agent.id, { canCreateAgents: false, codexProjectTaskAutoApprove: true });
+    await service.update(agent.id, { permissions: { canCreateAgents: false, codexProjectTaskAutoApprove: false } });
+    expect((await service.getById(agent.id))?.permissions.codexProjectTaskAutoApprove).toBe(true);
+  });
+
+  it.each(["permissions", "configuration"] as const)("preserves an owner revocation across an overlapping %s update", async (kind) => {
+    const companyId = await seedCompany();
+    const [agent] = await db.insert(agents).values({ companyId, name: "Concurrent permission fixture", adapterType: "process", permissions: { canCreateAgents: false, codexProjectTaskAutoApprove: true } }).returning();
+    const applicationName = `permission-race-${randomUUID()}`;
+    const writer = createDb(tempDb!.connectionString, { applicationName });
+    let ordinaryWrite: Promise<unknown> | undefined;
+    try {
+      await db.transaction(async owner => {
+        // Hold an uncommitted owner revocation. A stale, unlocked reader sees
+        // true and must not be allowed to write it back after this commits.
+        await owner.select().from(agents).where(eq(agents.id, agent.id)).for("no key update");
+        await owner.update(agents).set({ permissions: { canCreateAgents: false, codexProjectTaskAutoApprove: false } }).where(eq(agents.id, agent.id));
+        const service = agentService(writer);
+        ordinaryWrite = kind === "permissions"
+          ? service.updatePermissions(agent.id, { canCreateAgents: true })
+          : service.update(agent.id, { permissions: { canCreateAgents: true } });
+        // Observe a real database lock wait instead of relying on a sleep to
+        // guess whether the overlapping writer has reached the critical point.
+        await vi.waitFor(async () => {
+          const waiting = await db.execute(sql`select pid from pg_stat_activity where application_name = ${applicationName} and wait_event_type = 'Lock' and cardinality(pg_blocking_pids(pid)) > 0`);
+          expect(waiting.length).toBeGreaterThan(0);
+        }, { timeout: 5_000, interval: 20 });
+      });
+      await ordinaryWrite;
+      expect((await agentService(db).getById(agent.id))?.permissions).toMatchObject({ canCreateAgents: true, codexProjectTaskAutoApprove: false });
+    } finally {
+      await ordinaryWrite?.catch(() => {});
+      await writer.$client.end({ timeout: 1 });
     }
   });
 

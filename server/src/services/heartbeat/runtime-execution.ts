@@ -811,7 +811,9 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
       }
       if (authToken && configuredPaperclipApiBaseUrl() && issueRef) {
         runtimeMcpServers.unshift({ name: "Paperclip projects", url: `${paperclipApiBaseUrl()}/api/mcp/project-tools`,
-          token: authToken, connectionId: "paperclip-project-tools" });
+          token: authToken, connectionId: "paperclip-project-tools",
+          ...(agent.permissions?.codexProjectTaskAutoApprove === true ? { codexProjectTaskAutoApprove: true } : {}),
+        });
       }
       const runtimeMcp = createAdapterRuntimeMcpAccess(runtimeMcpServers);
       if (runtimeTools && runtimeToolDelivery === "invocation_context") {

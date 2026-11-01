@@ -14,6 +14,7 @@ import {
   ensureSymlink,
   evaluateCodexCredentialReadiness,
   mergeManagedCodexMcpGateways,
+  managedCodexMcpGatewaysFromRuntime,
   isManagedCodexHomePath,
   prepareManagedCodexHome,
   reconcileManagedCodexHome,
@@ -1039,6 +1040,27 @@ describe("evaluateCodexCredentialReadiness", () => {
     }
   });
 
+  it("preserves an existing direct server's restrictive tool policy when a managed gateway overlaps", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-mcp-policy-"));
+    const direct = '[mcp_servers.projects]\nurl = "http://127.0.0.1:1/direct"\n[mcp_servers.projects.tools.create_task]\napproval_mode = "prompt"\n';
+    try {
+      await fs.writeFile(path.join(root, "config.toml"), direct);
+      const result = await writeManagedCodexMcpConfig({
+        codexHome: root,
+        apiBaseUrl: "http://127.0.0.1:1",
+        gateways: [{ name: "projects", endpointPath: "/managed", bearerToken: "fixture-only" }],
+      });
+      const config = await fs.readFile(path.join(root, "config.toml"), "utf8");
+      expect(config.startsWith(direct)).toBe(true);
+      expect(config).toContain('[mcp_servers."paperclip-projects"]');
+      expect(result.warnings).toHaveLength(1);
+      await writeManagedCodexMcpConfig({ codexHome: root, apiBaseUrl: "http://127.0.0.1:1", gateways: [] });
+      expect(await fs.readFile(path.join(root, "config.toml"), "utf8")).toContain(direct.trim());
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("restricts permissions on an existing managed MCP config", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-mcp-config-"));
     try {
@@ -1508,5 +1530,92 @@ process.stdin.on("end", () => {
       if (staged) await fs.rm(staged, { recursive: true, force: true });
       await fs.rm(root, { recursive: true, force: true });
     }
+  });
+});
+
+
+describe("Board opt-in for Codex project task confirmation", () => {
+  const project = { name: "Paperclip projects", url: "http://127.0.0.1:1/api/mcp/project-tools", token: "fixture", connectionId: "paperclip-project-tools" };
+  it.each([undefined, false, true])("only writes create_task approval for explicit true (%s)", async enabled => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-project-policy-"));
+    try {
+      const gateways = managedCodexMcpGatewaysFromRuntime([{ ...project, codexProjectTaskAutoApprove: enabled }], "http://127.0.0.1:1");
+      await writeManagedCodexMcpConfig({ codexHome: root, apiBaseUrl: "http://127.0.0.1:1", gateways });
+      const config = await fs.readFile(path.join(root, "config.toml"), "utf8");
+      expect(config.includes('[mcp_servers."paperclip-projects".tools.create_task]')).toBe(enabled === true);
+      expect(config.includes('approval_mode = "approve"')).toBe(enabled === true);
+      expect(config).not.toContain("default_tools_approval_mode");
+      expect(config).not.toContain("approval_policy");
+      expect(config).not.toContain("sandbox_mode");
+      await writeManagedCodexMcpConfig({ codexHome: root, apiBaseUrl: "http://127.0.0.1:1", gateways: [] });
+      expect(await fs.readFile(path.join(root, "config.toml"), "utf8")).not.toContain("approval_mode");
+    } finally { await fs.rm(root, { recursive: true, force: true }); }
+  });
+  it.each(["http://127.0.0.1:1", "http://127.0.0.1:1/", "http://127.0.0.1:1/api", "http://127.0.0.1:1/api/"])("matches the canonical internal endpoint for API base %s", apiBase => {
+    expect(managedCodexMcpGatewaysFromRuntime([{ ...project, codexProjectTaskAutoApprove: true }], apiBase)[0]?.codexProjectTaskAutoApprove).toBe(true);
+  });
+  it.each([
+    { base: "http://EXAMPLE.TEST:80/api/", url: "http://EXAMPLE.TEST:80/api/mcp/project-tools" },
+    { base: "https://example.test/paperclip/api/", url: "https://example.test/paperclip/api/mcp/project-tools" },
+  ])("uses the producer's exact canonical endpoint without changing origin or path: %j", ({ base, url }) => {
+    expect(managedCodexMcpGatewaysFromRuntime([{ ...project, url, codexProjectTaskAutoApprove: true }], base)[0]?.codexProjectTaskAutoApprove).toBe(true);
+  });
+  it.each([
+    { connectionId: "external-connection" },
+    { url: "https://other.example/api/mcp/project-tools" },
+    { url: "http://127.0.0.1:1/mcp/gateways/external" },
+  ])("does not trust a matching display name or a policy on another runtime descriptor: %j", extra => {
+    expect(managedCodexMcpGatewaysFromRuntime([{ ...project, ...extra, codexProjectTaskAutoApprove: true }], "http://127.0.0.1:1")[0]).not.toHaveProperty("codexProjectTaskAutoApprove");
+  });
+  it("does not spread the policy to sibling gateways or existing direct entries", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-project-policy-"));
+    const direct = '[mcp_servers."paperclip-projects"]\nurl = "http://127.0.0.1:1/direct"\n[mcp_servers."paperclip-projects".tools.create_task]\napproval_mode = "prompt"\n';
+    try {
+      await fs.writeFile(path.join(root, "config.toml"), direct);
+      const gateways = managedCodexMcpGatewaysFromRuntime([ { ...project, codexProjectTaskAutoApprove: true }, { ...project, name: "Other tools", connectionId: "other", codexProjectTaskAutoApprove: true } ], "http://127.0.0.1:1");
+      await writeManagedCodexMcpConfig({ codexHome: root, apiBaseUrl: "http://127.0.0.1:1", gateways });
+      const config = await fs.readFile(path.join(root, "config.toml"), "utf8");
+      expect(config.startsWith(direct)).toBe(true);
+      expect(config).toContain('[mcp_servers."paperclip-paperclip-projects".tools.create_task]');
+      expect(config.match(/approval_mode = "approve"/g)).toHaveLength(1);
+      expect(config).not.toContain('[mcp_servers."other-tools".tools.');
+    } finally { await fs.rm(root, { recursive: true, force: true }); }
+  });
+});
+
+
+describe("CLI project policy handoff", () => {
+  it.each([false, true])("ignores config/context policy injection and honors only the runtime descriptor (%s)", async enabled => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-cli-project-handoff-"));
+    const companyId = randomUUID();
+    const home = path.join(root, "instances/default/companies", companyId, "codex-home");
+    try {
+      vi.stubEnv("PAPERCLIP_HOME", root); vi.stubEnv("PAPERCLIP_INSTANCE_ID", "default");
+      vi.stubEnv("PAPERCLIP_API_URL", "http://127.0.0.1:1");
+      vi.stubEnv("CODEX_HOME", path.join(root, "unused-source-home"));
+      await fs.mkdir(home, { recursive: true });
+      const command = path.join(root, "fake-codex");
+      await fs.writeFile(command, `#!${process.execPath}
+if (process.argv.includes("--version")) { console.log("codex-cli 0.166.0-alpha.5.1"); process.exit(0); }
+process.stdin.resume(); process.stdin.on("end", () => {
+ console.log(JSON.stringify({ type: "thread.started", thread_id: "fixture-session" }));
+ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } }));
+});
+`, { mode: 0o700 });
+      const result = await executeCodex({
+        runId: randomUUID(), agent: { id: randomUUID(), companyId, adapterType: "codex_local", name: "Policy fixture", adapterConfig: {} },
+        runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+        runtimeMcp: { getServers: () => [{ name: "Paperclip projects", connectionId: "paperclip-project-tools", url: "http://127.0.0.1:1/api/mcp/project-tools", token: "fixture", codexProjectTaskAutoApprove: enabled }] },
+        context: { paperclipManagedMcp: { managedMcpOnly: true, gateways: [{ name: "Injected tools", endpointPath: "http://127.0.0.1:1/injected", bearerToken: "fixture", codexProjectTaskAutoApprove: true }] } },
+        config: { engine: "cli", command, cwd: root, codexProjectTaskAutoApprove: true,
+          env: { CODEX_HOME: home, OPENAI_API_KEY: "fake-provider-key" }, paperclipSkillSync: { desiredSkills: [] } },
+        onLog: async () => {}, onMeta: async () => {},
+      });
+      expect(result.exitCode).toBe(0);
+      const config = await fs.readFile(path.join(home, "config.toml"), "utf8");
+      expect(config.includes('[mcp_servers."paperclip-projects".tools.create_task]')).toBe(enabled);
+      expect(config).not.toContain('[mcp_servers."injected-tools".tools.');
+      expect(config.match(/approval_mode = "approve"/g)?.length ?? 0).toBe(enabled ? 1 : 0);
+    } finally { vi.unstubAllEnvs(); await fs.rm(root, { recursive: true, force: true }); }
   });
 });

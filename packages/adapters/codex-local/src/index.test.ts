@@ -40,20 +40,20 @@ describe("codex model CLI floors", () => {
     expect(modelIds).toEqual(expect.arrayContaining(["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"]));
   });
 
-  it("compares stable versions numerically and rejects prerelease or ambiguous input", () => {
+  it("compares SemVer precedence without weakening the stable minimum", () => {
     expect(codexCliVersionAtLeast("0.159.0", "0.159.0")).toBe(true);
     expect(codexCliVersionAtLeast("0.160.1", "0.159.0")).toBe(true);
     expect(codexCliVersionAtLeast("1.0.0", "0.159.0")).toBe(true);
     expect(codexCliVersionAtLeast("0.156.1", "0.159.0")).toBe(false);
     expect(codexCliVersionAtLeast("0.16.0", "0.159.0")).toBe(false);
-    expect(codexCliVersionAtLeast("0.160.0-alpha.1", "0.159.0")).toBe(false);
+    expect(codexCliVersionAtLeast("0.160.0-alpha.1", "0.159.0")).toBe(true);
     expect(codexCliVersionAtLeast("", "0.159.0")).toBe(false);
   });
 
-  it("parses only a single stable `codex-cli x.y.z` line from --version output", () => {
+  it("parses only a single valid codex-cli SemVer line from --version output", () => {
     expect(parseCodexCliVersionOutput("codex-cli 0.160.0\n")).toBe("0.160.0");
     expect(parseCodexCliVersionOutput("WARNING: PATH unchanged\r\ncodex-cli 0.156.0\r\n")).toBe("0.156.0");
-    expect(parseCodexCliVersionOutput("codex-cli 0.162.0-alpha.17")).toBeNull();
+    expect(parseCodexCliVersionOutput("codex-cli 0.162.0-alpha.17")).toBe("0.162.0-alpha.17");
     expect(parseCodexCliVersionOutput("codex 0.160.0")).toBeNull();
     expect(parseCodexCliVersionOutput("codex-cli 0.149.0\ncodex-cli 0.160.0")).toBeNull();
     expect(parseCodexCliVersionOutput("")).toBeNull();
@@ -135,5 +135,28 @@ describe("codex local adapter metadata", () => {
     expect(normalizeCodexModel("future-model")).toBe("future-model");
     expect(normalizeCodexModel("")).toBe("");
     expect(normalizeCodexModel(null)).toBe("");
+  });
+});
+
+
+describe("Codex prerelease CLI compatibility", () => {
+  it.each(["0.166.0-alpha.5.1", "0.166.0-beta.1", "0.166.0-rc.2", "0.166.0+build.01", "0.166.0-alpha.5.1+desktop.01"])("accepts valid %s above the existing model floor", version => {
+    expect(parseCodexCliVersionOutput(`codex-cli ${version}\n`)).toBe(version);
+    expect(codexCliVersionAtLeast(version, "0.159.0")).toBe(true);
+  });
+  it.each(["0.159.0-alpha.1", "0.159.0-rc.99", "0.158.9+build.9"])("keeps %s below the stable floor", version => {
+    expect(codexCliVersionAtLeast(version, "0.159.0")).toBe(false);
+  });
+  it.each(["0.166.0-alpha.01", "00.166.0", "0.166.0-", "0.166.0+", "0.166.0-a..1", "0.166.0+bad..id", "9007199254740992.0.0", "unknown"])("rejects malformed %s", version => {
+    expect(parseCodexCliVersionOutput(`codex-cli ${version}`)).toBeNull();
+    expect(codexCliVersionAtLeast(version, "0.159.0")).toBe(false);
+  });
+  it("compares prerelease identifiers and ignores build metadata", () => {
+    expect(codexCliVersionAtLeast("0.166.0-alpha.10", "0.166.0-alpha.2")).toBe(true);
+    expect(codexCliVersionAtLeast("0.166.0-alpha", "0.166.0-alpha.1")).toBe(false);
+    expect(codexCliVersionAtLeast("0.166.0-beta", "0.166.0-alpha.99")).toBe(true);
+    expect(codexCliVersionAtLeast("0.166.0-1", "0.166.0-alpha")).toBe(false);
+    expect(codexCliVersionAtLeast("0.166.0", "0.166.0-rc.1")).toBe(true);
+    expect(codexCliVersionAtLeast("0.159.0+desktop", "0.159.0")).toBe(true);
   });
 });

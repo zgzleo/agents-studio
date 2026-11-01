@@ -90,6 +90,9 @@ export function normalizeAgentPermissions(
 
   return {
     ...record,
+    ...(Object.hasOwn(record, "codexProjectTaskAutoApprove") ? {
+      codexProjectTaskAutoApprove: options?.context !== "create" && record.codexProjectTaskAutoApprove === true,
+    } : {}),
     canCreateAgents:
       typeof record.canCreateAgents === "boolean"
         ? record.canCreateAgents

@@ -4096,3 +4096,43 @@ one-time config-file seed preserves existing choices, then later starts use the
 database without loading home `.env` files or repairing worktree config. See
 [Cloud runtime configuration](cloud-runtime-configuration.md) for field ownership,
 secret handling, initialization order and migration interfaces.
+
+
+## Legacy Codex project task confirmation
+
+`codex_local` keeps the current MCP client confirmation behavior unless a Board
+company owner explicitly opts an existing agent in using
+`PATCH /api/agents/{id}/permissions` with `codexProjectTaskAutoApprove: true`.
+Send the existing `canCreateAgents` and `canAssignTasks` values required by that
+endpoint; preserve them rather than changing unrelated grants. Set the new field
+to `false` to revoke the opt-in. Omission preserves its saved value. New agents
+start without the opt-in; create/hire payloads cannot set it. Agent callers,
+including CEOs, cannot change this field. A Board operator/admin grant alone is
+insufficient: the user must have active company owner membership. The existing
+human-role convention treats local implicit Board and instance administrators
+as owners. Agent creator and run responsible-user attribution do not grant
+ownership. The existing company management
+permission check and `agent.permissions_updated` audit apply. There is no new
+UI toggle; the Board API is the explicit configuration entry point.
+
+On the next eligible legacy Codex invocation, the control plane carries this
+permission only on its internal `paperclip-project-tools` runtime descriptor.
+The adapter verifies that descriptor's identity and exact API-origin endpoint,
+then writes `approval_mode = "approve"` only under the generated
+`mcp_servers.<managed-name>.tools.create_task` table. Other tools, assigned
+connections, unmanaged MCP entries, sandbox settings and the managed AI config
+override guard retain their behavior. A direct-name collision receives a separate
+managed entry and leaves the direct entry's policy intact. Paperclip's run,
+company, work-mode, task and approval checks still authorize the tool call;
+this setting changes only Codex's client confirmation for that one tool.
+Native Runner and ACPX policies are outside this option. Saving it does not
+start an agent or alter an existing invocation's prepared configuration. Generic
+configuration updates and imports preserve the stored opt-in and cannot grant
+or revoke it; imported new agents start without it.
+
+Codex CLI version probes accept strict SemVer prerelease and build identifiers.
+The model-specific minimums and capability checks remain. A prerelease of the
+same core version is below its stable release (`0.159.0-alpha.1 < 0.159.0`);
+a newer-core prerelease can meet an older stable floor
+(`0.166.0-alpha.5.1 > 0.159.0`). Build metadata does not affect precedence.
+Malformed or ambiguous version output still fails the probe.

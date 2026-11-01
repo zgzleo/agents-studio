@@ -4973,6 +4973,22 @@ export function agentRoutes(
     const existing = await getAccessibleResource(req, res, svc.getById(id), "Agent not found");
     if (!existing) return;
 
+    if (hasOwn(req.body as object, "codexProjectTaskAutoApprove")) {
+      if (req.actor.type !== "board") {
+        throw forbidden("Only company owners can configure Codex project task confirmation");
+      }
+      // Match the existing human owner semantics in access routes. An agent's
+      // creator and a run's responsible user are not company ownership grants.
+      if (req.actor.source !== "local_implicit" && !req.actor.isInstanceAdmin) {
+        const membership = req.actor.userId
+          ? await access.getMembership(existing.companyId, "user", req.actor.userId)
+          : null;
+        if (membership?.status !== "active" || membership.membershipRole !== "owner") {
+          throw forbidden("Only company owners can configure Codex project task confirmation");
+        }
+      }
+    }
+
     if (req.actor.type === "agent") {
       const actorAgent = req.actor.agentId ? await svc.getById(req.actor.agentId) : null;
       if (!actorAgent || actorAgent.companyId !== existing.companyId) {
@@ -5019,6 +5035,7 @@ export function agentRoutes(
       details: {
         canCreateAgents: agent.permissions?.canCreateAgents ?? false,
         canCreateSkills: agent.permissions?.canCreateSkills ?? true,
+        codexProjectTaskAutoApprove: agent.permissions?.codexProjectTaskAutoApprove === true,
         canAssignTasks: effectiveCanAssignTasks,
         trustPreset: agent.permissions?.trustPreset ?? "standard",
       },

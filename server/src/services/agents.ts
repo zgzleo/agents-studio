@@ -42,27 +42,27 @@ export function agentService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
     getById,
 
     updatePermissions: async (id: string, permissions: Record<string, unknown> & { canCreateAgents: boolean }) => {
-      const existing = await getById(id);
-      if (!existing) return null;
-      if (existing.status === "pending_approval") {
-        throw conflict("Pending approval agent permissions cannot be changed before board approval", {
-          code: "pending_approval_agent_config_frozen",
-          agentId: id,
-          fields: ["permissions"],
-        });
-      }
+      // Serialize the read/merge/write with owner revocations and generic
+      // configuration writes, which lock this same row before reading it.
+      const updatedId = await db.transaction(async (tx) => {
+        const [existing] = await tx.select().from(agents).where(eq(agents.id, id)).for("no key update");
+        if (!existing) return null;
+        if (existing.status === "pending_approval") {
+          throw conflict("Pending approval agent permissions cannot be changed before board approval", {
+            code: "pending_approval_agent_config_frozen",
+            agentId: id,
+            fields: ["permissions"],
+          });
+        }
 
-      const updated = await db
-        .update(agents)
-        .set({
+        const [updated] = await tx.update(agents).set({
           permissions: normalizeAgentPermissions({ ...existing.permissions, ...permissions }),
           updatedAt: new Date(),
-        })
-        .where(eq(agents.id, id))
-        .returning()
-        .then((rows) => rows[0] ?? null);
+        }).where(eq(agents.id, id)).returning({ id: agents.id });
+        return updated?.id ?? null;
+      });
 
-      return updated ? getById(updated.id) : null;
+      return updatedId ? getById(updatedId) : null;
     },
 
     listConfigRevisions: async (id: string) =>

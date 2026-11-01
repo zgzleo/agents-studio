@@ -2105,6 +2105,46 @@ describe("agent permission routes", () => {
     expect(res.body.permissions.canCreateSkills).toBe(false);
   });
 
+  it.each([true, false])("lets only Board set the Codex project confirmation opt-in to %s", async enabled => {
+    mockAgentService.updatePermissions.mockResolvedValue({ ...baseAgent, permissions: { canCreateAgents: false, codexProjectTaskAutoApprove: enabled } });
+    const app = await createApp({ type: "board", userId: "board-user", source: "local_implicit", isInstanceAdmin: true, companyIds: [companyId] });
+    const res = await requestApp(app, url => request(url).patch(`/api/agents/${agentId}/permissions`).send({ canCreateAgents: false, canAssignTasks: false, codexProjectTaskAutoApprove: enabled }));
+    expect(res.status).toBe(200);
+    expect(res.body.permissions.codexProjectTaskAutoApprove).toBe(enabled);
+    expect(mockAgentService.updatePermissions).toHaveBeenCalledWith(agentId, expect.objectContaining({ codexProjectTaskAutoApprove: enabled }));
+    expect(mockLogActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ details: expect.objectContaining({ codexProjectTaskAutoApprove: enabled }) }));
+  });
+
+  it("allows an authenticated active company owner to set the Codex project opt-in", async () => {
+    mockAccessService.getMembership.mockResolvedValue({ companyId, principalType: "user", principalId: "owner-user", status: "active", membershipRole: "owner" });
+    const app = await createApp({ type: "board", userId: "owner-user", source: "session", isInstanceAdmin: false, companyIds: [companyId] });
+    const res = await requestApp(app, url => request(url).patch(`/api/agents/${agentId}/permissions`).send({ canCreateAgents: false, canAssignTasks: false, codexProjectTaskAutoApprove: true }));
+    expect(res.status).toBe(200);
+    expect(mockAccessService.getMembership).toHaveBeenCalledWith(companyId, "user", "owner-user");
+    expect(mockAgentService.updatePermissions).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { membershipRole: "operator", status: "active" },
+    { membershipRole: "admin", status: "active" },
+    { membershipRole: "owner", status: "inactive" },
+  ])("rejects a non-owner Board despite agents:create permission: %j", async membership => {
+    mockAccessService.getMembership.mockResolvedValue({ companyId, principalType: "user", principalId: "other-user", ...membership });
+    mockAccessService.canUser.mockResolvedValue(true);
+    const app = await createApp({ type: "board", userId: "other-user", source: "session", isInstanceAdmin: false, companyIds: [companyId] });
+    const res = await requestApp(app, url => request(url).patch(`/api/agents/${agentId}/permissions`).send({ canCreateAgents: false, canAssignTasks: false, codexProjectTaskAutoApprove: true }));
+    expect(res.status).toBe(403);
+    expect(mockAgentService.updatePermissions).not.toHaveBeenCalled();
+  });
+
+  it.each(["ceo", "engineer"])("refuses Codex project confirmation policy from a %s agent", async role => {
+    mockAgentService.getById.mockImplementation(async (id: string) => id === "actor-agent" ? { ...baseAgent, id, role } : baseAgent);
+    const app = await createApp({ type: "agent", agentId: "actor-agent", companyId, runId: "run-1", source: "agent_key" });
+    const res = await requestApp(app, url => request(url).patch(`/api/agents/${agentId}/permissions`).send({ canCreateAgents: false, canAssignTasks: false, codexProjectTaskAutoApprove: true }));
+    expect(res.status).toBe(403);
+    expect(mockAgentService.updatePermissions).not.toHaveBeenCalled();
+  });
+
   it("rejects CEO permission updates outside the caller company scope", async () => {
     const app = await createApp({
       type: "agent",

@@ -154,33 +154,45 @@ export function codexChatGptRetirementHint(model: string | null | undefined): st
   return `OpenAI retired ${normalizeCodexModel(model)} from Codex with ChatGPT sign-in on ${retirement.retiredOn}. Choose ${retirement.replacement}, or use an OpenAI API key; API-key sessions are not affected.`;
 }
 
-const STABLE_CODEX_CLI_VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+// Strict SemVer: numeric prerelease identifiers cannot have leading zeroes;
+// build metadata is accepted and does not affect precedence.
+const CODEX_CLI_VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 
-function stableCodexCliVersionParts(version: string): number[] | null {
-  const match = STABLE_CODEX_CLI_VERSION.exec(version.trim());
+function codexCliVersionParts(version: string): { core: number[]; prerelease: string[] } | null {
+  const match = CODEX_CLI_VERSION.exec(version.trim());
   if (!match) return null;
-  const parts = match.slice(1).map(Number);
-  return parts.every(Number.isSafeInteger) ? parts : null;
+  const core = match.slice(1, 4).map(Number);
+  return core.every(Number.isSafeInteger) ? { core, prerelease: match[4]?.split(".") ?? [] } : null;
 }
 
-/** Read the version from `codex --version` output; prerelease or ambiguous output yields null. */
+/** Accept one unambiguous codex-cli SemVer line, including alpha/beta/rc builds. */
 export function parseCodexCliVersionOutput(output: string): string | null {
-  const versions = output
-    .split(/\r?\n/)
-    .map((line) => /^codex-cli (\S+)$/.exec(line.trim())?.[1])
+  const versions = output.split(/\r?\n/)
+    .map(line => /^codex-cli (\S+)$/.exec(line.trim())?.[1])
     .filter((version): version is string => version !== undefined);
-  if (versions.length !== 1 || !stableCodexCliVersionParts(versions[0]!)) return null;
+  if (versions.length !== 1 || !codexCliVersionParts(versions[0]!)) return null;
   return versions[0]!;
 }
 
 export function codexCliVersionAtLeast(version: string, minimum: string): boolean {
-  const parsedVersion = stableCodexCliVersionParts(version);
-  const parsedMinimum = stableCodexCliVersionParts(minimum);
-  if (!parsedVersion || !parsedMinimum) return false;
-  for (let index = 0; index < parsedMinimum.length; index += 1) {
-    if (parsedVersion[index] !== parsedMinimum[index]) {
-      return parsedVersion[index]! > parsedMinimum[index]!;
-    }
+  const parsed = codexCliVersionParts(version);
+  const floor = codexCliVersionParts(minimum);
+  if (!parsed || !floor) return false;
+  for (let i = 0; i < 3; i++) {
+    if (parsed.core[i] !== floor.core[i]) return parsed.core[i]! > floor.core[i]!;
+  }
+  // A prerelease is below the stable release with the same core version.
+  if (!parsed.prerelease.length) return true;
+  if (!floor.prerelease.length) return false;
+  for (let i = 0; i < Math.max(parsed.prerelease.length, floor.prerelease.length); i++) {
+    const left = parsed.prerelease[i]; const right = floor.prerelease[i];
+    if (left === undefined) return false;
+    if (right === undefined) return true;
+    if (left === right) continue;
+    const ln = /^\d+$/.test(left); const rn = /^\d+$/.test(right);
+    if (ln && rn) return left.length !== right.length ? left.length > right.length : left > right;
+    if (ln !== rn) return !ln;
+    return left > right;
   }
   return true;
 }

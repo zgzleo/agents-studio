@@ -86,6 +86,7 @@ import {
   seedManagedCodexHome,
   stageCodexHomeForSync,
   mergeManagedCodexMcpGateways,
+  managedCodexMcpGatewaysFromRuntime,
   writeManagedCodexMcpConfig,
   type ManagedCodexMcpGateway,
 } from "./codex-home.js";
@@ -799,11 +800,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       await onLog("stdout", `[paperclip] ${note}\n`);
     }
     const paperclipBaseEnv = buildPaperclipEnv(agent, ctx.agentIdentity);
-    const runtimeMcpGateways = (ctx.runtimeMcp?.getServers() ?? []).map((server) => ({
-      name: server.name,
-      endpointPath: server.url,
-      bearerToken: server.token,
-    }));
+    const runtimeMcpGateways = managedCodexMcpGatewaysFromRuntime(
+      ctx.runtimeMcp?.getServers() ?? [], paperclipBaseEnv.PAPERCLIP_API_URL,
+    );
     const managedMcpGateways = mergeManagedCodexMcpGateways(
       runtimeMcpGateways,
       managedMcpGatewaysFromContext(context),

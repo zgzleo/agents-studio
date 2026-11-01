@@ -201,6 +201,15 @@ from the hiring picker; API fixture creation does not prove this UI journey.
 
 ### `agent-configuration`
 
+Legacy Codex has a company-owner Board API-only opt-in for client confirmation of its internal
+project `create_task` tool. See [configuration and revocation](../../doc/DEVELOPING.md#legacy-codex-project-task-confirmation).
+Verify an omitted/false permission produces no override, explicit true affects
+only that internal tool, and saving false removes it on the next invocation.
+Agent/CEO writes must be rejected; verify the normal permissions audit and
+company boundary. Fixture coverage lives in agent permissions route/service,
+heartbeat runtime execution and Codex managed-home tests. A real model/tool run
+is separate qualification; a generated config is not that evidence.
+
 Automated: [instruction service](../../server/src/__tests__/agent-instructions-service.test.ts) and [instruction revisions](../../server/src/__tests__/agent-instruction-revisions.test.ts) cover file/revision contracts.
 
 The [AI account field regression](../../ui/src/components/ai-connections/AiConnectionField.test.tsx)

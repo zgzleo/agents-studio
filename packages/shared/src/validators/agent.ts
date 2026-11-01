@@ -15,6 +15,8 @@ import { objectWithoutDefaults } from "./partial.js";
 export const agentPermissionsSchema = z.object({
   // No schema default: the server derives the default (enabled unless the
   // permissions record marks the agent low-trust) when the field is omitted.
+  // Board-only update after creation; never accept this policy through hiring.
+  codexProjectTaskAutoApprove: z.never().optional(),
   canCreateAgents: z.boolean().optional(),
   canCreateSkills: z.boolean().optional().default(true),
   trustPreset: trustPresetSchema.optional(),
@@ -314,6 +316,7 @@ export const testAdapterEnvironmentSchema = z.object({
 export type TestAdapterEnvironment = z.infer<typeof testAdapterEnvironmentSchema>;
 
 export const updateAgentPermissionsSchema = z.object({
+  codexProjectTaskAutoApprove: z.boolean().optional(),
   canCreateAgents: z.boolean(),
   canCreateSkills: z.boolean().optional(),
   canAssignTasks: z.boolean(),

@@ -143,6 +143,34 @@ describe.skipIf(!support.supported)("heartbeat runtime execution boundary", () =
     expectCleanup(input);
   });
 
+  it.each([false, true])("delivers project confirmation policy only from stored Agent permission (%s)", async enabled => {
+    const previousUrl = process.env.PAPERCLIP_API_URL;
+    const previousSecret = process.env.PAPERCLIP_AGENT_JWT_SECRET;
+    process.env.PAPERCLIP_API_URL = "http://127.0.0.1:1";
+    process.env.PAPERCLIP_AGENT_JWT_SECRET = "fixture-only-project-policy-signing-secret";
+    try {
+      const { input, adapter } = await fixture();
+      Object.assign(adapter, { supportsLocalAgentJwt: true });
+      input.agent.permissions = { codexProjectTaskAutoApprove: enabled };
+      input.config.runtimeConfig.codexProjectTaskAutoApprove = true;
+      input.task.context.codexProjectTaskAutoApprove = true;
+      adapter.execute.mockImplementationOnce(async ctx => {
+        const servers = ctx.runtimeMcp?.getServers() ?? [];
+        const project = servers.find(server => server.connectionId === "paperclip-project-tools");
+        expect(project).toBeDefined();
+        expect(project?.url).toBe("http://127.0.0.1:1/api/mcp/project-tools");
+        expect(project?.codexProjectTaskAutoApprove === true).toBe(enabled);
+        expect(servers.filter(server => server.codexProjectTaskAutoApprove === true)).toHaveLength(enabled ? 1 : 0);
+        return { exitCode: 0, signal: null, timedOut: false };
+      });
+      expect(await executeHeartbeatRuntime(db, input)).toMatchObject({ dispatched: true });
+      expect(adapter.execute).toHaveBeenCalledOnce();
+    } finally {
+      if (previousUrl === undefined) delete process.env.PAPERCLIP_API_URL; else process.env.PAPERCLIP_API_URL = previousUrl;
+      if (previousSecret === undefined) delete process.env.PAPERCLIP_AGENT_JWT_SECRET; else process.env.PAPERCLIP_AGENT_JWT_SECRET = previousSecret;
+    }
+  });
+
   it("captures usage and live instruction saves before finalizing a legacy workspace", async () => {
     const { input, adapter, run } = await fixture();
     adapter.execute.mockImplementationOnce(async ctx => {
