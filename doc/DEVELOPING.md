@@ -4112,8 +4112,14 @@ insufficient: the user must have active company owner membership. The existing
 human-role convention treats local implicit Board and instance administrators
 as owners. Agent creator and run responsible-user attribution do not grant
 ownership. The existing company management
-permission check and `agent.permissions_updated` audit apply. There is no new
-UI toggle; the Board API is the explicit configuration entry point.
+permission check and `agent.permissions_updated` audit apply. The existing agent’s Permissions page also exposes “Allow Codex task creation
+without confirmation” for Codex agents. It reads the saved value, auto-saves
+through this Board API, and is read-only for users outside the owner boundary.
+The control stays disabled until the save is acknowledged. An acknowledged PATCH updates
+the detail cache before background refresh, so a failed refresh cannot restore an old value
+or keep a completed save pending indefinitely.
+A lost or ambiguous save response locks permission changes until “Check saved
+permission” successfully reads the current state; it never blindly resends the write.
 
 On the next eligible legacy Codex invocation, the control plane carries this
 permission only on its internal `paperclip-project-tools` runtime descriptor.

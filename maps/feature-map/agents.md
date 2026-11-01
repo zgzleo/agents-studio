@@ -201,8 +201,9 @@ from the hiring picker; API fixture creation does not prove this UI journey.
 
 ### `agent-configuration`
 
-Legacy Codex has a company-owner Board API-only opt-in for client confirmation of its internal
-project `create_task` tool. See [configuration and revocation](../../doc/DEVELOPING.md#legacy-codex-project-task-confirmation).
+The Agent Permissions page exposes a company-owner opt-in for client confirmation
+of Legacy Codex’s internal project `create_task` tool. Verify owner enable/save/reload and revoke/save/reload,
+non-owner read-only state, and failed saves retaining the saved value. See [configuration and revocation](../../doc/DEVELOPING.md#legacy-codex-project-task-confirmation).
 Verify an omitted/false permission produces no override, explicit true affects
 only that internal tool, and saving false removes it on the next invocation.
 Agent/CEO writes must be rejected; verify the normal permissions audit and

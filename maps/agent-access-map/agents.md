@@ -161,7 +161,8 @@ lifecycle mutation shortcut. See [the format](../../doc/agent-configuration-yaml
 
 Capability ID: `agents/instructions`.
 
-The optional `codexProjectTaskAutoApprove` field on
+The Agent Permissions page uses the same owner-only API; it does not grant
+agent callers authority. The optional `codexProjectTaskAutoApprove` field on
 `PATCH /api/agents/{id}/permissions` is company-owner-only, including revocation (the existing local implicit Board
 and instance-admin owner semantics apply).
 It defaults off and cannot be injected through create/hire permissions;

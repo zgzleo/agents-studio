@@ -37,6 +37,9 @@ import { AgentSkillsTab } from "./agent-skills/AgentSkillsTab";
 import { AgentConfigForm } from "../components/AgentConfigForm";
 import { agentDisplayAdapterType, getAdapterDisplay } from "../adapters/adapter-display-registry";
 import { adapterLabels, roleLabels, help } from "../components/agent-config-primitives";
+import { cacheAgentPermissionResponse } from "@/lib/agent-permission-cache";
+import { CodexTaskApprovalPermission } from "@/components/CodexTaskApprovalPermission";
+import type { CurrentBoardAccess } from "@/api/access";
 import { ToggleSwitch } from "@/components/ui/toggle-switch";
 import { useAdapterCapabilities } from "@/adapters/use-adapter-capabilities";
 import { MarkdownEditor } from "../components/MarkdownEditor";
@@ -562,21 +565,40 @@ export function AgentDetail() {
     },
   });
 
+  const [permissionSaveUncertain, setPermissionSaveUncertain] = useState(false);
+  const [checkingPermissions, setCheckingPermissions] = useState(false);
   const updatePermissions = useMutation({
+    retry: false,
     mutationFn: (permissions: AgentPermissionUpdate) =>
       agentsApi.updatePermissions(agentLookupRef, permissions, resolvedCompanyId ?? undefined),
-    onSuccess: () => {
+    onSuccess: async (saved) => {
+      await cacheAgentPermissionResponse(queryClient, [routeAgentRef, agentLookupRef], saved);
+      setPermissionSaveUncertain(false);
       setActionError(null);
-      queryClient.invalidateQueries({ queryKey: queryKeys.agents.detail(routeAgentRef) });
-      queryClient.invalidateQueries({ queryKey: queryKeys.agents.detail(agentLookupRef) });
-      if (resolvedCompanyId) {
-        queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(resolvedCompanyId) });
-      }
+      void Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.agents.detail(routeAgentRef) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.agents.detail(agentLookupRef) }),
+        ...(resolvedCompanyId ? [queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(resolvedCompanyId) })] : []),
+      ]).catch(() => { /* The acknowledged response remains authoritative if refresh fails. */ });
     },
-    onError: (err) => {
-      setActionError(err instanceof Error ? err.message : "Failed to update permissions");
+    onError: (err, permissions) => {
+      const uncertain = permissions.codexProjectTaskAutoApprove !== undefined
+        && (!(err instanceof ApiError) || err.status >= 500 || err.status === 408);
+      setPermissionSaveUncertain(uncertain);
+      setActionError(uncertain ? "The save outcome is unknown. Check the saved permissions before trying again." : err.message);
     },
   });
+  const checkSavedPermissions = async () => {
+    setCheckingPermissions(true);
+    try {
+      const saved = await agentsApi.get(agentLookupRef, lookupCompanyId);
+      await cacheAgentPermissionResponse(queryClient, [routeAgentRef, agentLookupRef], saved);
+      setPermissionSaveUncertain(false);
+      setActionError(null);
+    } catch {
+      setActionError("Could not verify saved permissions. Try checking again when the connection recovers.");
+    } finally { setCheckingPermissions(false); }
+  };
 
   useEffect(() => {
     const crumbs: { label: string; href?: string }[] = [
@@ -1014,6 +1036,10 @@ export function AgentDetail() {
             onSavingChange={setConfigSaving}
             updatePermissions={updatePermissions}
             content="permissions"
+            boardAccess={boardAccess}
+            permissionSaveUncertain={permissionSaveUncertain}
+            checkingPermissions={checkingPermissions}
+            onCheckSavedPermissions={checkSavedPermissions}
           />
         </div>
       )}
@@ -1524,6 +1550,10 @@ export function ConfigurationTab({
   hidePromptTemplate,
   hideInstructionsFile,
   content = "runtime",
+  boardAccess,
+  permissionSaveUncertain = false,
+  checkingPermissions = false,
+  onCheckSavedPermissions,
   canConfigureProviderTrace = false,
 }: {
   agent: AgentDetailRecord;
@@ -1536,6 +1566,10 @@ export function ConfigurationTab({
   hidePromptTemplate?: boolean;
   hideInstructionsFile?: boolean;
   content?: "runtime" | "permissions" | "secrets";
+  boardAccess?: CurrentBoardAccess;
+  permissionSaveUncertain?: boolean;
+  checkingPermissions?: boolean;
+  onCheckSavedPermissions?: () => void;
   canConfigureProviderTrace?: boolean;
 }) {
   const queryClient = useQueryClient();
@@ -1661,7 +1695,7 @@ export function ConfigurationTab({
       {content === "permissions" ? <TrustPresetSection
         projectAccessEditor={<AgentProjectAccessSettings agent={agent} />}
         permissions={agent.permissions}
-        disabled={updatePermissions.isPending}
+        disabled={updatePermissions.isPending || permissionSaveUncertain}
         companyId={companyId}
         projectCandidates={(boundaryProjects ?? []).map((project) => ({
           id: project.id,
@@ -1701,7 +1735,7 @@ export function ConfigurationTab({
                   canAssignTasks: !canCreateAgents ? true : canAssignTasks,
                 })
               }
-              disabled={updatePermissions.isPending}
+              disabled={updatePermissions.isPending || permissionSaveUncertain}
             />
           </div>
           <div className="flex items-center justify-between gap-4 text-sm">
@@ -1720,7 +1754,7 @@ export function ConfigurationTab({
                   canAssignTasks,
                 })
               }
-              disabled={updatePermissions.isPending}
+              disabled={updatePermissions.isPending || permissionSaveUncertain}
             />
           </div>
           <div className="flex items-center justify-between gap-4 text-sm">
@@ -1739,9 +1773,24 @@ export function ConfigurationTab({
                   canAssignTasks: !canAssignTasks,
                 })
               }
-              disabled={updatePermissions.isPending || taskAssignLocked}
+              disabled={updatePermissions.isPending || permissionSaveUncertain || taskAssignLocked}
             />
           </div>
+          {agent.adapterType === "codex_local" && <CodexTaskApprovalPermission
+            checked={agent.permissions?.codexProjectTaskAutoApprove === true}
+            access={boardAccess}
+            companyId={companyId}
+            pending={updatePermissions.isPending}
+            uncertain={permissionSaveUncertain}
+            checking={checkingPermissions}
+            onCheckSaved={onCheckSavedPermissions}
+            onCheckedChange={(checked) => updatePermissions.mutate({
+              canCreateAgents,
+              canCreateSkills,
+              canAssignTasks,
+              codexProjectTaskAutoApprove: checked,
+            })}
+          />}
         </div>
       </div> : null}
     </div>
