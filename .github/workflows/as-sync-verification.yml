@@ -14,19 +14,27 @@ jobs:
     timeout-minutes: 35
     strategy:
       fail-fast: false
-      max-parallel: 13
+      max-parallel: 17
       matrix:
         include:
           - label: typecheck-build
             command: "node scripts/typecheck-low-memory.mjs\npnpm build"
           - label: server-0
-            command: "pnpm test:run:general -- --group general-server-without-chat --shard-index 0 --shard-count 4"
+            command: "pnpm test:run:general -- --group general-server-without-chat --shard-index 0 --shard-count 8"
           - label: server-1
-            command: "pnpm test:run:general -- --group general-server-without-chat --shard-index 1 --shard-count 4"
+            command: "pnpm test:run:general -- --group general-server-without-chat --shard-index 1 --shard-count 8"
           - label: server-2
-            command: "pnpm test:run:general -- --group general-server-without-chat --shard-index 2 --shard-count 4"
+            command: "pnpm test:run:general -- --group general-server-without-chat --shard-index 2 --shard-count 8"
           - label: server-3
-            command: "pnpm test:run:general -- --group general-server-without-chat --shard-index 3 --shard-count 4"
+            command: "pnpm test:run:general -- --group general-server-without-chat --shard-index 3 --shard-count 8"
+          - label: server-4
+            command: "pnpm test:run:general -- --group general-server-without-chat --shard-index 4 --shard-count 8"
+          - label: server-5
+            command: "pnpm test:run:general -- --group general-server-without-chat --shard-index 5 --shard-count 8"
+          - label: server-6
+            command: "pnpm test:run:general -- --group general-server-without-chat --shard-index 6 --shard-count 8"
+          - label: server-7
+            command: "pnpm test:run:general -- --group general-server-without-chat --shard-index 7 --shard-count 8"
           - label: serialized-0
             command: "pnpm test:run:serialized -- --shard-index 0 --shard-count 2"
           - label: serialized-1
