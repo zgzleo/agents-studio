@@ -85,14 +85,13 @@ describeEmbeddedPostgres("native ingress bootstrap retry through the real Runner
         identity: { kind: provider } }, normalizedSessionId: native.normalizedSessionId }));
     const digest = (file: string) => `sha256:${createHash("sha256").update(readFileSync(file)).digest("hex")}`;
     const opencode = join(runtimeRoot, "fake-opencode-ingress");
-    const providerNode = provider === "opencode" && process.platform === "linux"
+    const providerNode = provider === "opencode"
       ? join(runtimeRoot, "node") : process.execPath;
     const providerCalls = join(sandbox, "provider-calls.log");
     if (provider === "opencode") {
-      if (process.platform === "linux") {
-        await copyFile(process.execPath, providerNode);
-        await chmod(providerNode, 0o500);
-      }
+      // A remote provider receives a staged Node artifact, including on macOS test hosts.
+      await copyFile(process.execPath, providerNode);
+      await chmod(providerNode, 0o500);
       const script = resolve(runnerWorkspace, "../test/fixtures/fake-opencode-server.mjs");
       execFileSync("cc", ["-x", "c", "-o", opencode, "-"], { input:
         `#include <unistd.h>\n#include <stdlib.h>\n#include <stdio.h>\nint main(int argc, char **argv) { FILE *log = fopen(${JSON.stringify(providerCalls)}, "a"); if (!log) return 126; fputs("process-start\\n", log); fclose(log); char **args = calloc(argc + 2, sizeof(char *)); args[0] = ${JSON.stringify(providerNode)}; args[1] = ${JSON.stringify(script)}; for (int i = 1; i < argc; i++) args[i + 1] = argv[i]; execv(args[0], args); return 127; }` });
