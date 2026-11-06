@@ -5,8 +5,8 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: as-sync-${{ github.ref }}
-  cancel-in-progress: true
+  group: as-sync-${{ github.ref }}-${{ github.sha }}
+  cancel-in-progress: false
 jobs:
   verify:
     name: ${{ matrix.label }}
@@ -46,7 +46,6 @@ jobs:
     env:
       PAPERCLIP_TELEMETRY_DISABLED: '1'
       DO_NOT_TRACK: '1'
-      HEARTBEAT_SCHEDULER_ENABLED: 'false'
       PAPERCLIP_TEST_POSTGRES_RESERVED_PORTS: '3100,54329'
       PAPERCLIP_API_URL: http://127.0.0.1:1
       PAPERCLIP_CHAT_SHARD_WORKERS: '3'
@@ -64,5 +63,12 @@ jobs:
           package-manager-cache: false
       - name: Install fixed dependencies
         run: pnpm install --frozen-lockfile
+      # Server fixtures use both the development daemon path and release cargo builds.
+      # Build before timed test hooks; these binaries contain no model credentials.
+      - name: Build Linux mock Runner prerequisites
+        if: startsWith(matrix.label, 'server-')
+        run: |
+          cargo build --locked --manifest-path packages/paperclip-runner/runner/Cargo.toml -p paperclip-runner-core --bin paperclip-runnerd
+          cargo build --release --locked --manifest-path packages/paperclip-runner/runner/Cargo.toml -p paperclip-runner-core --bin paperclip-runnerd
       - name: Verify assigned complete scope
         run: ${{ matrix.command }}
