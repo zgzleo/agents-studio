@@ -14,27 +14,29 @@ jobs:
     timeout-minutes: 35
     strategy:
       fail-fast: false
-      max-parallel: 17
+      max-parallel: 18
       matrix:
         include:
           - label: typecheck-build
             command: "node scripts/typecheck-low-memory.mjs\npnpm build"
           - label: server-0
-            command: "pnpm test:run:general -- --group general-server-without-chat --shard-index 0 --shard-count 8"
+            command: "pnpm test:run:general -- --group general-server-without-chat-or-native-runner --shard-index 0 --shard-count 8"
           - label: server-1
-            command: "pnpm test:run:general -- --group general-server-without-chat --shard-index 1 --shard-count 8"
+            command: "pnpm test:run:general -- --group general-server-without-chat-or-native-runner --shard-index 1 --shard-count 8"
           - label: server-2
-            command: "pnpm test:run:general -- --group general-server-without-chat --shard-index 2 --shard-count 8"
+            command: "pnpm test:run:general -- --group general-server-without-chat-or-native-runner --shard-index 2 --shard-count 8"
           - label: server-3
-            command: "pnpm test:run:general -- --group general-server-without-chat --shard-index 3 --shard-count 8"
+            command: "pnpm test:run:general -- --group general-server-without-chat-or-native-runner --shard-index 3 --shard-count 8"
           - label: server-4
-            command: "pnpm test:run:general -- --group general-server-without-chat --shard-index 4 --shard-count 8"
+            command: "pnpm test:run:general -- --group general-server-without-chat-or-native-runner --shard-index 4 --shard-count 8"
           - label: server-5
-            command: "pnpm test:run:general -- --group general-server-without-chat --shard-index 5 --shard-count 8"
+            command: "pnpm test:run:general -- --group general-server-without-chat-or-native-runner --shard-index 5 --shard-count 8"
           - label: server-6
-            command: "pnpm test:run:general -- --group general-server-without-chat --shard-index 6 --shard-count 8"
+            command: "pnpm test:run:general -- --group general-server-without-chat-or-native-runner --shard-index 6 --shard-count 8"
           - label: server-7
-            command: "pnpm test:run:general -- --group general-server-without-chat --shard-index 7 --shard-count 8"
+            command: "pnpm test:run:general -- --group general-server-without-chat-or-native-runner --shard-index 7 --shard-count 8"
+          - label: native-runner
+            command: "pnpm test:run:general -- --group general-server-native-runner"
           - label: serialized-0
             command: "pnpm test:run:serialized -- --shard-index 0 --shard-count 2"
           - label: serialized-1
@@ -58,6 +60,7 @@ jobs:
       PAPERCLIP_API_URL: http://127.0.0.1:1
       PAPERCLIP_CHAT_SHARD_WORKERS: '3'
       CARGO_BUILD_JOBS: '2'
+      CARGO_HOME: ${{ runner.temp }}/as-sync-cargo
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -74,9 +77,23 @@ jobs:
       # Server fixtures use both the development daemon path and release cargo builds.
       # Build before timed test hooks; these binaries contain no model credentials.
       - name: Build Linux mock Runner prerequisites
-        if: startsWith(matrix.label, 'server-')
+        if: startsWith(matrix.label, 'server-') || matrix.label == 'native-runner'
         run: |
-          cargo build --locked --manifest-path packages/paperclip-runner/runner/Cargo.toml -p paperclip-runner-core --bin paperclip-runnerd
-          cargo build --release --locked --manifest-path packages/paperclip-runner/runner/Cargo.toml -p paperclip-runner-core --bin paperclip-runnerd
+          cargo build --locked --manifest-path packages/paperclip-runner/runner/Cargo.toml -p paperclip-runner-core --bins
+          cargo build --release --locked --manifest-path packages/paperclip-runner/runner/Cargo.toml -p paperclip-runner-core --bins
+      - name: Verify the exact warm release build used by the test hook
+        if: startsWith(matrix.label, 'server-') || matrix.label == 'native-runner'
+        env:
+          CARGO_NET_OFFLINE: 'true'
+        run: |
+          python3 - <<'PYTHON'
+          import pathlib, subprocess, time
+          root = pathlib.Path.cwd() / 'packages/paperclip-runner'
+          started = time.monotonic()
+          subprocess.run(['cargo', 'build', '--release', '--locked', '--manifest-path', str(root / 'runner/Cargo.toml'), '-p', 'paperclip-runner-core', '--bin', 'paperclip-runnerd'], cwd=root, check=True)
+          print(f'::notice title=Warm Runner hook build::{time.monotonic() - started:.3f} seconds; fixed Cargo home; offline')
+          PYTHON
       - name: Verify assigned complete scope
+        env:
+          CARGO_NET_OFFLINE: ${{ (startsWith(matrix.label, 'server-') || matrix.label == 'native-runner') && 'true' || 'false' }}
         run: ${{ matrix.command }}
