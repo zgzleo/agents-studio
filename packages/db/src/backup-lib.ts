@@ -1017,6 +1017,37 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
       emit("");
     }
 
+    // Restore checks after the data so NOT VALID constraints can coexist
+    // with historical rows they were never validated against.
+    const allChecks = await sql<{
+      schema_name: string;
+      tablename: string;
+      constraint_name: string;
+      definition: string;
+    }[]>`
+      SELECT n.nspname AS schema_name, c.relname AS tablename,
+        k.conname AS constraint_name, pg_get_constraintdef(k.oid) AS definition
+      FROM pg_constraint k
+      JOIN pg_class c ON c.oid = k.conrelid
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE k.contype = 'c'
+        AND k.conislocal
+        AND ${sql.unsafe(nonSystemSchemaPredicate("n.nspname"))}
+      ORDER BY n.nspname, c.relname, k.conname
+    `;
+    const checks = allChecks.filter((entry) => (
+      includedTableNames.has(tableKey(entry.schema_name, entry.tablename))
+    ));
+    if (checks.length > 0) {
+      emit("-- Check constraints");
+      for (const check of checks) {
+        emitStatement(
+          `ALTER TABLE ${quoteQualifiedName(check.schema_name, check.tablename)} ADD CONSTRAINT ${quoteIdentifier(check.constraint_name)} ${check.definition};`,
+        );
+      }
+      emit("");
+    }
+
     const allTriggers = await sql<{
       schema_name: string;
       tablename: string;

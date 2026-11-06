@@ -194,7 +194,7 @@ describeEmbeddedPostgres("runDatabaseBackup", () => {
         await sourceSql.unsafe(`
           CREATE TABLE "public"."backup_test_records" (
             "id" serial PRIMARY KEY,
-            "title" text NOT NULL,
+            "title" text NOT NULL CONSTRAINT "title_not_empty" CHECK (length("title") > 0),
             "payload" text NOT NULL,
             "state" "public"."backup_test_state" NOT NULL,
             "metadata" jsonb,
@@ -260,6 +260,10 @@ describeEmbeddedPostgres("runDatabaseBackup", () => {
           FROM "public"."backup_test_records"
         `);
         expect(counts[0]?.count).toBe(160);
+
+        await expect(restoreSql`
+          UPDATE "public"."backup_test_records" SET "title" = '' WHERE "title" = 'row-0'
+        `).rejects.toMatchObject({ code: "23514", constraint_name: "title_not_empty" });
 
         const sampleRows = await restoreSql.unsafe<{
           title: string;
