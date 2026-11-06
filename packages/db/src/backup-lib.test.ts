@@ -674,4 +674,67 @@ describeEmbeddedPostgres("runDatabaseBackup", () => {
     },
     20_000,
   );
+
+  it("preserves Unicode line separators and carriage returns in JavaScript backup restores", async () => {
+    const source = await createTempDatabase();
+    const target = await createSiblingDatabase(source, "paperclip_unicode_restore_target");
+    const backupDir = createTempDir("paperclip-unicode-restore-");
+    const sourceSql = postgres(source, { max: 1, onnotice: () => {} });
+    const targetSql = postgres(target, { max: 1, onnotice: () => {} });
+    const previousPsql = process.env.PAPERCLIP_PSQL_PATH;
+    process.env.PAPERCLIP_PSQL_PATH = "/bin/false";
+    const body = "首\u2028🌟\u2029中\r\n后\r末\n";
+    const payload = { text: "x".repeat(70_000) + body, "$paperclip$": body };
+    try {
+      await sourceSql`create table unicode_restore (id integer primary key, body text, payload jsonb)`;
+      await sourceSql`insert into unicode_restore values (1, ${body}, ${sourceSql.json(payload)})`;
+      const [original] = await sourceSql`select body, payload from unicode_restore where id=1`;
+      expect(original).toEqual({ body, payload });
+      const backup = await runDatabaseBackup({
+        connectionString: source, backupDir, backupEngine: "javascript",
+        retention: { dailyDays: 7, weeklyWeeks: 1, monthlyMonths: 1 },
+      });
+      await runDatabaseRestore({ connectionString: target, backupFile: backup.backupFile });
+      const [row] = await targetSql`select body, payload from unicode_restore where id=1`;
+      expect(row).toEqual({ body, payload });
+    } finally {
+      if (previousPsql === undefined) delete process.env.PAPERCLIP_PSQL_PATH;
+      else process.env.PAPERCLIP_PSQL_PATH = previousPsql;
+      await sourceSql.end();
+      await targetSql.end();
+    }
+  }, 60_000);
+
+  it.each([false, true])("preserves microsecond timestamps in JavaScript backups (arrays=%s)", async (includeArrays) => {
+    const source = await createTempDatabase();
+    const target = await createSiblingDatabase(source, "paperclip_temporal_restore_target");
+    const backupDir = createTempDir("paperclip-temporal-restore-");
+    const sourceSql = postgres(source, { max: 1, onnotice: () => {} });
+    const targetSql = postgres(target, { max: 1, onnotice: () => {} });
+    const previousPsql = process.env.PAPERCLIP_PSQL_PATH;
+    process.env.PAPERCLIP_PSQL_PATH = "/bin/false";
+    try {
+      await sourceSql.unsafe(`
+        create table temporal_restore (id integer primary key, instant timestamptz,
+          local_time timestamp, history timestamptz[], ticks timestamp[]);
+        insert into temporal_restore values (1, '2026-11-06 12:34:56.123456+00',
+          '2026-11-06 12:34:56.654321',
+          ${includeArrays ? "array[timestamptz '2026-11-06 12:34:56.234567+00', null, '2026-11-06 12:34:56.345678+00']" : "NULL"},
+          ${includeArrays ? "array[timestamp '2026-11-06 12:34:56.765432', null]" : "NULL"});
+      `);
+      const [before] = await sourceSql`select to_jsonb(t) as record from temporal_restore t`;
+      const backup = await runDatabaseBackup({
+        connectionString: source, backupDir, backupEngine: "javascript",
+        retention: { dailyDays: 7, weeklyWeeks: 1, monthlyMonths: 1 },
+      });
+      await runDatabaseRestore({ connectionString: target, backupFile: backup.backupFile });
+      const [after] = await targetSql`select to_jsonb(t) as record from temporal_restore t`;
+      expect(after.record).toEqual(before.record);
+    } finally {
+      if (previousPsql === undefined) delete process.env.PAPERCLIP_PSQL_PATH;
+      else process.env.PAPERCLIP_PSQL_PATH = previousPsql;
+      await sourceSql.end();
+      await targetSql.end();
+    }
+  }, 60_000);
 });

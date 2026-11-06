@@ -1,6 +1,5 @@
 import { createReadStream, createWriteStream, existsSync, mkdirSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { basename, resolve } from "node:path";
-import { createInterface } from "node:readline";
 import { spawn } from "node:child_process";
 import { open as openFile } from "node:fs/promises";
 import { pipeline } from "node:stream/promises";
@@ -414,10 +413,22 @@ async function* readRestoreStatements(backupFile: string): AsyncGenerator<string
   const raw = createReadStream(backupFile);
   const stream = backupFile.endsWith(".gz") ? raw.pipe(createGunzip()) : raw;
   stream.setEncoding("utf8");
-  const reader = createInterface({
-    input: stream,
-    crlfDelay: Infinity,
-  });
+  // readline normalizes Unicode line separators and carriage returns. Inside
+  // dollar-quoted JSON or text those are data, so split only on the writer's LF.
+  async function* backupLines(): AsyncGenerator<string> {
+    let pending = "";
+    for await (const chunk of stream) {
+      pending += chunk;
+      let start = 0;
+      let end: number;
+      while ((end = pending.indexOf("\n", start)) !== -1) {
+        yield pending.slice(start, end);
+        start = end + 1;
+      }
+      pending = pending.slice(start);
+    }
+    if (pending.length > 0) yield pending;
+  }
   let statementLines: string[] = [];
 
   const flushStatement = () => {
@@ -427,8 +438,8 @@ async function* readRestoreStatements(backupFile: string): AsyncGenerator<string
   };
 
   try {
-    for await (const line of reader) {
-      if (line === STATEMENT_BREAKPOINT) {
+    for await (const line of backupLines()) {
+      if (line === STATEMENT_BREAKPOINT || line === `${STATEMENT_BREAKPOINT}\r`) {
         const statement = flushStatement();
         if (statement.length > 0) {
           yield statement;
@@ -443,7 +454,6 @@ async function* readRestoreStatements(backupFile: string): AsyncGenerator<string
       yield trailingStatement;
     }
   } finally {
-    reader.close();
     stream.destroy();
     raw.destroy();
   }
@@ -993,9 +1003,12 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
         continue;
       }
 
-      const binaryArray = (column: (typeof cols)[number]) => column.data_type === "ARRAY"
-        && column.udt_schema === "pg_catalog" && column.udt_name === "_bytea";
-      const projection = cols.some(binaryArray) ? cols.map(column => binaryArray(column)
+      // JS Date truncates PostgreSQL microseconds and can shift zone-less times.
+      // Native array text also preserves temporal precision and binary elements.
+      const losslessText = (column: (typeof cols)[number]) => column.data_type === "ARRAY"
+        || ["date", "timestamp with time zone", "timestamp without time zone",
+          "time with time zone", "time without time zone"].includes(column.data_type);
+      const projection = cols.some(losslessText) ? cols.map(column => losslessText(column)
         ? `${quoteIdentifier(column.column_name)}::text AS ${quoteIdentifier(column.column_name)}`
         : quoteIdentifier(column.column_name)).join(", ") : "*";
       const rowCursor = sql
