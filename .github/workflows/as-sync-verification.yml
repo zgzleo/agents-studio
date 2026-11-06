@@ -6,17 +6,50 @@ permissions:
   contents: read
 concurrency:
   group: as-sync-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 jobs:
   verify:
+    name: ${{ matrix.label }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      max-parallel: 13
+      matrix:
+        include:
+          - label: typecheck-build
+            command: "node scripts/typecheck-low-memory.mjs\npnpm build"
+          - label: server-0
+            command: "pnpm test:run:general -- --group general-server-without-chat --shard-index 0 --shard-count 4"
+          - label: server-1
+            command: "pnpm test:run:general -- --group general-server-without-chat --shard-index 1 --shard-count 4"
+          - label: server-2
+            command: "pnpm test:run:general -- --group general-server-without-chat --shard-index 2 --shard-count 4"
+          - label: server-3
+            command: "pnpm test:run:general -- --group general-server-without-chat --shard-index 3 --shard-count 4"
+          - label: serialized-0
+            command: "pnpm test:run:serialized -- --shard-index 0 --shard-count 2"
+          - label: serialized-1
+            command: "pnpm test:run:serialized -- --shard-index 1 --shard-count 2"
+          - label: workspaces-a-0
+            command: "pnpm test:run:general -- --group general-workspaces-a --shard-index 0 --shard-count 2"
+          - label: workspaces-a-1
+            command: "pnpm test:run:general -- --group general-workspaces-a --shard-index 1 --shard-count 2"
+          - label: workspaces-b
+            command: "pnpm test:run:general -- --group general-workspaces-b"
+          - label: workspaces-c
+            command: "pnpm test:run:general -- --group general-workspaces-c"
+          - label: chat-0
+            command: "pnpm test:run:general -- --group general-chat --shard-index 0 --shard-count 2"
+          - label: chat-1
+            command: "pnpm test:run:general -- --group general-chat --shard-index 1 --shard-count 2"
     env:
       PAPERCLIP_TELEMETRY_DISABLED: '1'
       DO_NOT_TRACK: '1'
       HEARTBEAT_SCHEDULER_ENABLED: 'false'
       PAPERCLIP_TEST_POSTGRES_RESERVED_PORTS: '3100,54329'
       PAPERCLIP_API_URL: http://127.0.0.1:1
+      PAPERCLIP_CHAT_SHARD_WORKERS: '3'
       CARGO_BUILD_JOBS: '2'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -31,9 +64,5 @@ jobs:
           package-manager-cache: false
       - name: Install fixed dependencies
         run: pnpm install --frozen-lockfile
-      - name: Typecheck
-        run: node scripts/typecheck-low-memory.mjs
-      - name: Unit and mock integration tests
-        run: pnpm test:run
-      - name: Build
-        run: pnpm build
+      - name: Verify assigned complete scope
+        run: ${{ matrix.command }}
