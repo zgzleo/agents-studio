@@ -198,7 +198,9 @@ describeEmbeddedPostgres("runDatabaseBackup", () => {
             "payload" text NOT NULL,
             "state" "public"."backup_test_state" NOT NULL,
             "metadata" jsonb,
-            "created_at" timestamptz NOT NULL DEFAULT now()
+            "external_id" text,
+            "created_at" timestamptz NOT NULL DEFAULT now(),
+            CONSTRAINT "external_id_per_title" UNIQUE NULLS NOT DISTINCT ("title", "external_id")
           );
         `);
         await sourceSql.unsafe(`
@@ -264,6 +266,11 @@ describeEmbeddedPostgres("runDatabaseBackup", () => {
         await expect(restoreSql`
           UPDATE "public"."backup_test_records" SET "title" = '' WHERE "title" = 'row-0'
         `).rejects.toMatchObject({ code: "23514", constraint_name: "title_not_empty" });
+
+        await expect(restoreSql`
+          INSERT INTO "public"."backup_test_records" ("title", "payload", "state")
+          VALUES ('row-0', 'duplicate', 'pending')
+        `).rejects.toMatchObject({ code: "23505", constraint_name: "external_id_per_title" });
 
         const sampleRows = await restoreSql.unsafe<{
           title: string;
