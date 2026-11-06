@@ -947,19 +947,20 @@ const recoveryFakeCodex = resolve(
         ),
         previousDriverSessionId: checkpoint.sessionId,
       });
-      const [epoch] = await readdir(join(root, "authority-epochs"));
+      // A continuity break retires the authority epochs along with their provider session.
+      expect(await readdir(root)).not.toContain("authority-epochs");
+      const [continuityArchive] = await readdir(join(root, "continuity-breaks"));
+      const archivedEpochs = join(root, "continuity-breaks", continuityArchive!, "authority-epochs");
+      const [epoch] = await readdir(archivedEpochs);
       const digest = (value: Buffer) =>
         createHash("sha256").update(value).digest("hex");
       expect(
         digest(
           await readFile(
-            join(root, "authority-epochs", epoch!, "runner-state.json"),
+            join(archivedEpochs, epoch!, "runner-state.json"),
           ),
         ),
       ).toBe(digest(damagedRunnerBytes));
-      const [continuityArchive] = await readdir(
-        join(root, "continuity-breaks"),
-      );
       const archivedProvider = JSON.parse(
         await readFile(
           join(
