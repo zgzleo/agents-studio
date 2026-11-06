@@ -16496,7 +16496,9 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
         vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"], shouldAdvanceTime: true });
         await f.service.registerGitHubWebhookRecoveryWork(coordinator, () => true).ready;
         await expect.poll(() => idleWorkSnapshot().active).toBe(0);
-        expect(coordinator.nextWakeAt()).toBe(dueAt);
+        // Committed-write notifications can schedule an immediate reconciliation after ready.
+        // Wait for that reconciliation to restore the exact durable deadline before testing quiet time.
+        await expect.poll(() => coordinator.nextWakeAt()).toBe(dueAt);
         const reads = vi.spyOn(db, "select");
         try { await vi.advanceTimersByTimeAsync(15_000); expect(reads).not.toHaveBeenCalled(); }
         finally { reads.mockRestore(); }

@@ -71,7 +71,8 @@ function makeConfigPath(root: string, enabled: boolean): string {
 describe("cli telemetry", () => {
   beforeEach(() => {
     process.env = { ...ORIGINAL_ENV };
-    for (const key of CI_ENV_VARS) {
+    // Each case controls telemetry explicitly; inherited runner opt-outs must not mask enabled behavior.
+    for (const key of [...CI_ENV_VARS, "PAPERCLIP_TELEMETRY_DISABLED", "DO_NOT_TRACK"]) {
       delete process.env[key];
     }
     vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true })));
