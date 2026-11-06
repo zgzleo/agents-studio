@@ -5,9 +5,10 @@ import {
   HeadObjectCommand,
   PutObjectCommand,
   ListObjectsV2Command,
+  ListObjectVersionsCommand,
 } from "@aws-sdk/client-s3";
 import { putS3Multipart } from "./s3-multipart.js";
-import { withS3FailureDiagnostics } from "./s3-failure.js";
+import { recordS3BodyFailure, withS3FailureDiagnostics } from "./s3-failure.js";
 import { addAbortSignal, Readable } from "node:stream";
 import type { StorageProvider, GetObjectResult, HeadObjectResult } from "./types.js";
 import { notFound, unprocessable } from "../errors.js";
@@ -79,6 +80,32 @@ export function createS3StorageProvider(config: S3ProviderConfig): StorageProvid
     forcePathStyle: Boolean(config.forcePathStyle),
   });
 
+  async function listExactVersions(key: string, signal?: AbortSignal) {
+    const versions = new Set<string>(), cursors = new Set<string>();
+    let keyMarker: string | undefined, versionMarker: string | undefined;
+    while (true) {
+      signal?.throwIfAborted();
+      const output = await client.send(new ListObjectVersionsCommand({ Bucket: bucket, Prefix: key,
+        KeyMarker: keyMarker, VersionIdMarker: versionMarker, MaxKeys: 1000 }), { abortSignal: signal });
+      if (typeof output.IsTruncated !== "boolean") throw new Error("s3_version_listing_invalid");
+      for (const entry of [...(output.Versions ?? []), ...(output.DeleteMarkers ?? [])]) {
+        if (typeof entry.Key !== "string" || !entry.Key.startsWith(key) ||
+          typeof entry.VersionId !== "string" || !entry.VersionId) throw new Error("s3_version_listing_invalid");
+        // Prefix is the narrowest S3 listing filter, but neighboring keys are never ours to delete.
+        if (entry.Key === key) versions.add(entry.VersionId);
+      }
+      if (!output.IsTruncated) return versions;
+      const nextKey = output.NextKeyMarker, nextVersion = output.NextVersionIdMarker;
+      if (!nextKey || !nextKey.startsWith(key) || !nextVersion ||
+        (keyMarker && Buffer.compare(Buffer.from(nextKey), Buffer.from(keyMarker)) < 0)) {
+        throw new Error("s3_version_listing_cursor_invalid");
+      }
+      const cursor = JSON.stringify([nextKey, nextVersion]);
+      if (cursors.has(cursor)) throw new Error("s3_version_listing_cursor_invalid");
+      cursors.add(cursor); keyMarker = nextKey; versionMarker = nextVersion;
+    }
+  }
+
   return {
     id: "s3",
 
@@ -140,6 +167,12 @@ export function createS3StorageProvider(config: S3ProviderConfig): StorageProvid
         ));
 
         const stream = await toReadableStream(output.Body);
+        // Observe, do not handle: a consumer without an error listener still
+        // sees the failure exactly as it would without this one.
+        stream.on("error", function recordBodyFailure(error) {
+          recordS3BodyFailure(error, output);
+          if (stream.listenerCount("error") === 1) throw error;
+        });
         if (input.signal) addAbortSignal(input.signal, stream);
         return {
           stream,
@@ -182,6 +215,19 @@ export function createS3StorageProvider(config: S3ProviderConfig): StorageProvid
 
     async deleteObject(input): Promise<void> {
       const key = buildKey(prefix, input.objectKey);
+      if (input.allVersions) {
+        await withS3FailureDiagnostics("delete_object", async () => {
+          // Finish listing before deleting: removing a cursor version must not skip later pages.
+          const versions = await listExactVersions(key, input.signal);
+          for (const versionId of versions) {
+            input.signal?.throwIfAborted();
+            await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key, VersionId: versionId }),
+              { abortSignal: input.signal });
+          }
+          if ((await listExactVersions(key, input.signal)).size) throw new Error("s3_object_versions_still_present");
+        });
+        return;
+      }
       await withS3FailureDiagnostics("delete_object", () => client.send(
         new DeleteObjectCommand({
           Bucket: bucket,

@@ -1,3 +1,4 @@
+import { notifyAttentionRetentionWork } from "./retention-work-notifications.js";
 import { type BudgetServiceHooks } from "./budgets.js";
 
 import { and, desc, eq, inArray } from "drizzle-orm";
@@ -55,6 +56,7 @@ export function agentService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
           });
         }
 
+        await notifyAttentionRetentionWork(tx, { companyId: existing.companyId });
         const [updated] = await tx.update(agents).set({
           permissions: normalizeAgentPermissions({ ...existing.permissions, ...permissions }),
           updatedAt: new Date(),
