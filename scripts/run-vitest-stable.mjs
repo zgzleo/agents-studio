@@ -92,6 +92,7 @@ const chatSuite = "server/src/__tests__/chat-channels.integration.test.ts";
 // that build was a ~4m30s cold compile of every third-party crate on each run
 // (277s of a 291s shard vitest step, actions run 35246999382, 2026-09-17).
 const nativeRunnerSuites = [
+  "server/src/services/native-runtime/runner-tool-results-prp.integration.test.ts",
   "server/src/services/native-runtime/plugin-runner-probe.test.ts",
   "server/src/services/native-runtime/native-codex-runner.integration.test.ts",
   "server/src/services/native-runtime/native-ingress-bootstrap-retry.integration.test.ts",

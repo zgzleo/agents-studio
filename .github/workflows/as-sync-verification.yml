@@ -14,7 +14,7 @@ jobs:
     timeout-minutes: 35
     strategy:
       fail-fast: false
-      max-parallel: 18
+      max-parallel: 19
       matrix:
         include:
           - label: typecheck-build
@@ -35,8 +35,28 @@ jobs:
             command: "pnpm test:run:general -- --group general-server-without-chat-or-native-runner --shard-index 6 --shard-count 8"
           - label: server-7
             command: "pnpm test:run:general -- --group general-server-without-chat-or-native-runner --shard-index 7 --shard-count 8"
-          - label: native-runner
-            command: "pnpm test:run:general -- --group general-server-native-runner"
+          - label: native-runner-0
+            command: |
+              pnpm run preflight:workspace-links
+              pnpm --filter @paperclipai/plugin-sdk ensure-build-deps
+              python3 - <<'PYTHON'
+              import json, subprocess
+              inventory = json.loads(subprocess.check_output(['node', 'scripts/run-vitest-stable.mjs', '--mode', 'general', '--group', 'general-server-native-runner', '--dry-run'], text=True))
+              files = inventory['selectedGeneralServerSuites'][0::2]
+              assert files
+              subprocess.run(['pnpm', 'exec', 'vitest', 'run', '--project', '@paperclipai/server', '--pool=forks', '--isolate', '--maxWorkers=1', '--no-file-parallelism', *files], check=True)
+              PYTHON
+          - label: native-runner-1
+            command: |
+              pnpm run preflight:workspace-links
+              pnpm --filter @paperclipai/plugin-sdk ensure-build-deps
+              python3 - <<'PYTHON'
+              import json, subprocess
+              inventory = json.loads(subprocess.check_output(['node', 'scripts/run-vitest-stable.mjs', '--mode', 'general', '--group', 'general-server-native-runner', '--dry-run'], text=True))
+              files = inventory['selectedGeneralServerSuites'][1::2]
+              assert files
+              subprocess.run(['pnpm', 'exec', 'vitest', 'run', '--project', '@paperclipai/server', '--pool=forks', '--isolate', '--maxWorkers=1', '--no-file-parallelism', *files], check=True)
+              PYTHON
           - label: serialized-0
             command: "pnpm test:run:serialized -- --shard-index 0 --shard-count 2"
           - label: serialized-1
@@ -60,7 +80,6 @@ jobs:
       PAPERCLIP_API_URL: http://127.0.0.1:1
       PAPERCLIP_CHAT_SHARD_WORKERS: '3'
       CARGO_BUILD_JOBS: '2'
-      CARGO_HOME: ${{ runner.temp }}/as-sync-cargo
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -72,17 +91,21 @@ jobs:
         with:
           node-version: 24.22.1
           package-manager-cache: false
+      - name: Initialize a stable isolated Cargo cache
+        run: |
+          mkdir -p "$RUNNER_TEMP/as-sync-cargo"
+          printf 'CARGO_HOME=%s/as-sync-cargo\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - name: Install fixed dependencies
         run: pnpm install --frozen-lockfile
       # Server fixtures use both the development daemon path and release cargo builds.
       # Build before timed test hooks; these binaries contain no model credentials.
       - name: Build Linux mock Runner prerequisites
-        if: startsWith(matrix.label, 'server-') || matrix.label == 'native-runner'
+        if: startsWith(matrix.label, 'server-') || startsWith(matrix.label, 'native-runner-')
         run: |
           cargo build --locked --manifest-path packages/paperclip-runner/runner/Cargo.toml -p paperclip-runner-core --bins
           cargo build --release --locked --manifest-path packages/paperclip-runner/runner/Cargo.toml -p paperclip-runner-core --bins
       - name: Verify the exact warm release build used by the test hook
-        if: startsWith(matrix.label, 'server-') || matrix.label == 'native-runner'
+        if: startsWith(matrix.label, 'server-') || startsWith(matrix.label, 'native-runner-')
         env:
           CARGO_NET_OFFLINE: 'true'
         run: |
@@ -95,5 +118,5 @@ jobs:
           PYTHON
       - name: Verify assigned complete scope
         env:
-          CARGO_NET_OFFLINE: ${{ (startsWith(matrix.label, 'server-') || matrix.label == 'native-runner') && 'true' || 'false' }}
+          CARGO_NET_OFFLINE: ${{ (startsWith(matrix.label, 'server-') || startsWith(matrix.label, 'native-runner-')) && 'true' || 'false' }}
         run: ${{ matrix.command }}
