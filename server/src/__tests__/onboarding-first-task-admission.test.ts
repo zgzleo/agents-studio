@@ -16,6 +16,39 @@ import { recoveryPostgresSupport as support } from "./helpers/recovery-postgres.
 import { startRunnerApiTestServer } from "./helpers/runner-api-server.js";
 import { CAPABILITY_SEMANTIC_TOOL_CATALOG } from "../vendor/paperclip-runner/index.js";
 
+// Snapshot queries have no ORDER BY. Compare every row and field by its unique
+// ID, without making physical database order part of the no-mutation contract.
+function snapshotRowsById<T extends { id: string }>(rows: readonly T[]): T[] {
+  return [...rows].sort((a, b) => a.id.localeCompare(b.id));
+}
+
+describe("unordered snapshot equality", () => {
+  const rows = [
+    { id: "b", title: "Child", details: { accepted: true }, updatedAt: new Date(1) },
+    { id: "a", title: "Dependency", details: { accepted: false }, updatedAt: new Date(2) },
+  ];
+
+  it("ignores row order without changing the source array", () => {
+    expect(snapshotRowsById([...rows].reverse())).toEqual(snapshotRowsById(rows));
+    expect(rows.map(row => row.id)).toEqual(["b", "a"]);
+  });
+
+  it.each([
+    { id: "different" },
+    { title: "Changed" },
+    { details: { accepted: false } },
+    { updatedAt: new Date(3) },
+  ])("still detects changed fields: %j", change => {
+    const changed = [{ ...rows[0]!, ...change }, rows[1]!];
+    expect(snapshotRowsById(changed)).not.toEqual(snapshotRowsById(rows));
+  });
+
+  it("still detects missing and duplicate rows", () => {
+    expect(snapshotRowsById(rows.slice(1))).not.toEqual(snapshotRowsById(rows));
+    expect(snapshotRowsById([...rows, rows[0]!])).not.toEqual(snapshotRowsById(rows));
+  });
+});
+
 async function nativeProposalRecipe(kind: "confirmation" | "checkbox", planRevisionId: string = randomUUID()) {
   const skill = await readFile(new URL("../onboarding-assets/first-task/skills/first-task/SKILL.md", import.meta.url), "utf8");
   const recipes = [...skill.matchAll(/^ {0,3}```json\n([\s\S]*?)^ {0,3}```/gm)].map(match => JSON.parse(match[1]!) as Record<string, unknown>);
@@ -758,8 +791,8 @@ describe.skipIf(!support.supported)("onboarding first-task execution admission",
     // Existing dispatch recovery remains bounded to this already-admitted child.
     expect(wakes).toHaveLength(2);
     const after = await f.snapshot();
-    expect(after.issues).toEqual(before.issues);
-    expect(after.activity).toEqual(before.activity);
+    expect(snapshotRowsById(after.issues)).toEqual(snapshotRowsById(before.issues));
+    expect(snapshotRowsById(after.activity)).toEqual(snapshotRowsById(before.activity));
     const [afterRun] = await server.db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, f.runId));
     expect(afterRun.resultJson).toEqual(beforeRun.resultJson);
     await expect(authority.execute({ ...input, arguments: { ...input.arguments, idempotencyKey: "new" } })).rejects.toThrow(/proposal.*accept/i);
