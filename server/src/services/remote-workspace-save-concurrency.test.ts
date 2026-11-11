@@ -24,6 +24,7 @@ import { currentControllerBootId } from "./controller-process-identity.js";
 import { createOwnershipReportState, runOwnershipReconciliationPass } from "./recovery/ownership-invariant-report.js";
 import { remoteTerminationReceipt } from "./remote-execution-termination.js";
 import { migrateRemoteWorkspace } from "./remote-workspace-migration.js";
+import { remoteWorkspaceCaptureFailureMessage } from "./remote-workspace-snapshot-archive.js";
 
 const exec = promisify(execFile);
 function deferred() {
@@ -76,7 +77,13 @@ describe.skipIf(!support.supported)("remote workspace save parent lock order", (
       kind: "remote", transport: "sandbox", leaseId: lease.id, remoteCwd, timeoutMs: 30_000,
       runner: { syncIn: transfer, syncOut: transfer, execute: async input => {
         const result = await exec(input.command, input.args ?? [], { cwd: input.cwd ?? remoteCwd,
-          env: { ...process.env, ...input.env }, timeout: input.timeoutMs, maxBuffer: 8 * 1024 * 1024 });
+          env: { ...process.env, ...input.env }, timeout: input.timeoutMs, maxBuffer: 8 * 1024 * 1024 }).catch(error => {
+          // Keep the bounded cause visible before an assertion prints the long node -e command.
+          console.error("workspace-save-order-child-failure", { command: input.command, code: error.code,
+            signal: error.signal, killed: error.killed,
+            cause: remoteWorkspaceCaptureFailureMessage({ message: error.stderr?.trim() }) });
+          throw error;
+        });
         return { exitCode: 0, stdout: result.stdout, stderr: result.stderr, signal: null, timedOut: false,
           pid: process.pid, startedAt: new Date().toISOString() };
       } },
@@ -436,6 +443,18 @@ describe.skipIf(!support.supported)("remote workspace save parent lock order", (
     });
     await ready.promise;
     const command = "printf 'effect\\n' >> provision-count.txt";
+    const provisionRelease = deferred();
+    let provisionWaiting = false;
+    if (mode === "provision") {
+      const execute = f.target.runner!.execute.bind(f.target.runner!);
+      f.target.runner!.execute = async input => {
+        if (input.command === "bash" && input.args?.[1] === command) {
+          provisionWaiting = true;
+          await provisionRelease.promise;
+        }
+        return execute(input);
+      };
+    }
     const provision = () => provisionRemoteWorkspace({ db: peerDb, companyId: f.companyId, workspaceId: f.workspace.id,
       runId: f.runId, epoch: authority.epoch, remoteCwd: authority.location!.remoteCwd, target: f.target, commands: [command] });
     const settle = <T,>(work: Promise<T>): Promise<PromiseSettledResult<T>> => work.then(
@@ -458,6 +477,13 @@ describe.skipIf(!support.supported)("remote workspace save parent lock order", (
       await expect.poll(async () => Boolean(await waiting("save-order-reverse-save")), { timeout: 5000 }).toBe(true);
       const saveWait = await waiting("save-order-reverse-save");
       release.resolve(); await barrier;
+      if (mode === "provision") {
+        // Exercise overlapping database operations without racing the archive's
+        // source-consistency check against the provisioning filesystem write.
+        await expect.poll(() => provisionWaiting, { timeout: 5000 }).toBe(true);
+        await saving;
+        provisionRelease.resolve();
+      }
       const results = await Promise.all([saving, peer]);
       const errors = results.filter(result => result.status === "rejected").map(result =>
         (result as PromiseRejectedResult).reason as Error & { cause?: { code?: string; detail?: string; where?: string } });
@@ -483,7 +509,7 @@ describe.skipIf(!support.supported)("remote workspace save parent lock order", (
         if (mode === "provision") expect(await readFile(path.join(loaded.root, "provision-count.txt"), "utf8")).toBe("effect\n");
       } finally { await loaded.cleanup(); }
     } finally {
-      release.resolve(); await barrier; await Promise.all([saving, peer]);
+      provisionRelease.resolve(); release.resolve(); await barrier; await Promise.all([saving, peer]);
       await saveDb.$client.end(); await peerDb.$client.end();
     }
   }, 30_000);
