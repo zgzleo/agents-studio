@@ -1,5 +1,6 @@
 import { readWakeChatConversationId } from "../../run-dispatch/index.js";
 import { enrichPromotedWakeContext, wakeMustNotJoinActiveRun } from "../domain/context.js";
+import { QUEUED_MESSAGES_DELIVERED_REASON } from "../domain/policy.js";
 import {
   decideQueuedCommentAction,
   decideReleaseRecovery,
@@ -226,7 +227,8 @@ async function runReleaseDrain(
       continue;
     }
 
-    let liveness = { liveNonSelfCommentIds: candidate.queuedCommentIds, containedSelfAuthoredComment: false };
+    let liveness: { liveNonSelfCommentIds: string[]; containedSelfAuthoredComment: boolean; deliveredCommentIds?: string[] } =
+      { liveNonSelfCommentIds: candidate.queuedCommentIds, containedSelfAuthoredComment: false };
     if (
       !candidate.authorizedFailedChatRetry &&
       candidate.queuedCommentIds.length > 0
@@ -270,7 +272,9 @@ async function runReleaseDrain(
         agentId: candidate.agentId,
         reason: commentAction.selfAuthored
           ? "Deferred wake contained only comments authored by the finishing run"
-          : "Queued messages were discarded before promotion",
+          : liveness.deliveredCommentIds?.length
+            ? QUEUED_MESSAGES_DELIVERED_REASON
+            : "Queued messages were discarded before promotion",
         now: input.now,
       });
       continue;

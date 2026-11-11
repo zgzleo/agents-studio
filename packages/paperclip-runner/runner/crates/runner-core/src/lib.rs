@@ -9,6 +9,7 @@ pub mod acpx_provider_checkpoint;
 pub mod acpx_provider_session;
 pub mod acpx_provider_state;
 pub mod acpx_sidecar_transport;
+mod acpx_turn_dispatch;
 pub mod aws_agentcore_provider;
 pub mod claude_managed_provider;
 pub mod codex_provider;
@@ -31,6 +32,8 @@ pub mod managed_provider;
 pub mod managed_provider_backend;
 pub mod native_provider_backend;
 pub mod oom_score;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod process_lineage;
 pub mod process_supervisor;
 pub mod provider_backend;
 pub mod provider_bridge;

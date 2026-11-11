@@ -100,6 +100,29 @@ describeEmbeddedPostgres("pending approval agent config integrity", () => {
     expect((await service.getById(agent.id))?.permissions.codexProjectTaskAutoApprove).toBe(true);
   });
 
+  it("preserves owner opt-in, CEO denial and interaction restrictions together on ordinary writes", async () => {
+    const companyId = await seedCompany();
+    const denial = { actorType: "user", actorId: "owner", at: "2026-11-11T00:00:00.000Z" };
+    const interactions = { canConfigureOtherAgents: false, canReceiveConfigurationChangesFromAgents: false };
+    const [agent] = await db.insert(agents).values({
+      companyId, name: "Combined permission fixture", role: "ceo", adapterType: "process",
+      permissions: { canCreateAgents: false, ceoHiringDeniedBy: denial, codexProjectTaskAutoApprove: true, interactions },
+    }).returning();
+    const service = agentService(db);
+    await service.update(agent.id, { permissions: { canCreateSkills: false, codexProjectTaskAutoApprove: false,
+      ceoHiringDeniedBy: { actorType: "user", actorId: "forged", at: "later" } } } as never);
+    expect((await service.getById(agent.id))?.permissions).toMatchObject({
+      canCreateAgents: false, canCreateSkills: false, ceoHiringDeniedBy: denial,
+      codexProjectTaskAutoApprove: true, interactions,
+    });
+    await service.updatePermissions(agent.id, { canCreateAgents: false, codexProjectTaskAutoApprove: false });
+    expect((await service.getById(agent.id))?.permissions).toMatchObject({
+      canCreateAgents: false, ceoHiringDeniedBy: denial, codexProjectTaskAutoApprove: false, interactions,
+    });
+    await expect(service.updatePermissions(agent.id, { canCreateAgents: false, interactions: {} })).rejects.toMatchObject({ status: 403 });
+    expect((await service.getById(agent.id))?.permissions).toMatchObject({ interactions, codexProjectTaskAutoApprove: false });
+  });
+
   it.each(["permissions", "configuration"] as const)("preserves an owner revocation across an overlapping %s update", async (kind) => {
     const companyId = await seedCompany();
     const [agent] = await db.insert(agents).values({ companyId, name: "Concurrent permission fixture", adapterType: "process", permissions: { canCreateAgents: false, codexProjectTaskAutoApprove: true } }).returning();
@@ -228,5 +251,36 @@ describeEmbeddedPostgres("pending approval agent config integrity", () => {
       budgetMonthlyCents: 1234,
       metadata: { source: "hire-form" },
     });
+  });
+
+  it("keeps a CEO's hiring authority as saved when another permission changes", async () => {
+    const companyId = await seedCompany();
+    const service = agentService(db);
+    const insertCeo = (permissions: Record<string, unknown>) => db.insert(agents).values({
+      companyId, name: `CEO ${randomUUID()}`, role: "ceo", permissions,
+      adapterType: "process", adapterConfig: {}, runtimeConfig: {},
+    }).returning().then(rows => rows[0]!);
+    const stored = (id: string) => db.select().from(agents).where(eq(agents.id, id)).then(rows => rows[0]!.permissions as Record<string, unknown>);
+
+    const legacy = await insertCeo({});
+    await service.updatePermissions(legacy.id, { canCreateSkills: false } as never);
+    expect(await stored(legacy.id)).toMatchObject({ canCreateAgents: true, canCreateSkills: false });
+
+    const unrecorded = await insertCeo({ canCreateAgents: false, canCreateSkills: true });
+    await service.updatePermissions(unrecorded.id, { canCreateSkills: false } as never);
+    expect(await stored(unrecorded.id)).toMatchObject({ canCreateAgents: true, canCreateSkills: false });
+
+    const denial = { actorType: "user", actorId: "board-user", at: "2026-11-08T00:00:00.000Z" };
+    const denied = await insertCeo({ canCreateAgents: false, canCreateSkills: true, ceoHiringDeniedBy: denial });
+    await service.updatePermissions(denied.id, { canCreateSkills: false } as never);
+    expect(await stored(denied.id)).toMatchObject({ canCreateAgents: false, canCreateSkills: false, ceoHiringDeniedBy: denial });
+
+    // An import update whose manifest omits the field keeps the board's denial,
+    // and a supplied denial record is never taken from input.
+    await service.update(denied.id, { permissions: {} } as never);
+    expect(await stored(denied.id)).toMatchObject({ canCreateAgents: false, ceoHiringDeniedBy: denial });
+    const open = await insertCeo({ canCreateAgents: true });
+    await service.update(open.id, { permissions: { canCreateAgents: false, ceoHiringDeniedBy: denial } } as never);
+    expect(await stored(open.id)).not.toHaveProperty("ceoHiringDeniedBy");
   });
 });

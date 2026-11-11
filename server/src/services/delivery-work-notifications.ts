@@ -2,6 +2,9 @@ import { signalDatabaseWork, subscribeDatabaseWork } from "@paperclipai/db/work-
 
 /** Topics for existing durable queues; register intent before their writes. */
 export const DELIVERY_QUEUES = {
+  mcpClientMirror: "mcp-client-mirror",
+  mcpIngressHandoffs: "mcp-ingress-handoffs",
+  mcpRevocationIndex: "mcp-revocation-index",
   nativeRuntimeResponses: "native-runtime-responses",
   nativeCancellation: "native-cancellation",
   deploymentNotifications: "deployment-notifications",
@@ -9,6 +12,7 @@ export const DELIVERY_QUEUES = {
   nativeProcessSessions: "native-process-sessions",
   nativeQuestionCancellations: "native-question-cancellations",
   activeExecutionRecovery: "active-execution-recovery",
+  ownershipInvariantReport: "ownership-invariant-report",
   settledNativeProcesses: "settled-native-processes",
   orphanActiveLeases: "orphan-active-leases",
   legacyShutdownSettlement: "legacy-shutdown-settlement",
@@ -54,6 +58,7 @@ export const DELIVERY_QUEUES = {
   scheduledRetryCancellation: "scheduled-retry-cancellation",
   executionFinalization: "execution-finalization",
   workspaceRecovery: "workspace-recovery",
+  providerLimitResume: "provider-limit-resume",
   executionReplacement: "execution-replacement",
   executionContinuation: "execution-continuation",
   executionStatus: "execution-status",
@@ -84,6 +89,7 @@ export const DELIVERY_QUEUES = {
   budgetEnforcement: "budget-enforcement",
   accounting: "cost-accounting",
   taskDrainExpiry: "task-drain-expiry",
+  controllerInstanceLease: "controller-instance-lease",
   agentLifecycle: "agent-lifecycle",
   chatBoardMessages: "chat-board-messages",
   chatTaskStarts: "chat-task-starts",

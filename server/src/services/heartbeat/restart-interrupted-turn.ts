@@ -5,15 +5,22 @@ import { isUserCommentContinuationReason } from "../explicit-native-continuation
 import { requestTaskRetry } from "../task-retry.js";
 import { HttpError } from "../../errors.js";
 import { logger } from "../../middleware/logger.js";
+import { NATIVE_REMOTE_RECOVERY_LEASE_MISMATCH } from "../native-runtime/remote-recovery-lease-mismatch.js";
 
 /** Reattachment could not find the run's original runner or allocation: the
  * sandbox lease or plugin task is gone, or the remote runner process is not
  * there to verify. This is infrastructure, not the task's own failure. */
-const REATTACHMENT_LOST_ERRORS = ["native_remote_recovery_lease_mismatch", "native_plugin_recovery_lease_mismatch",
-  "runner_remote_process_identity_unavailable"];
+const REATTACHMENT_LOST_ERRORS = [NATIVE_REMOTE_RECOVERY_LEASE_MISMATCH, "native_plugin_recovery_lease_mismatch",
+  "runner_remote_process_identity_unavailable", "runner_continuity_break_archive_failed"];
 
-const TURN_STARTED_EVENTS = ["turn.submitted", "turn.started", "turn.accepted"];
-const TURN_SETTLED_EVENTS = ["turn.completed", "turn.failed", "turn.cancelled", "turn.interrupted"];
+/** A failure message is one of the closed codes, optionally followed by
+ * ": " and bounded diagnostic detail (for example, the archive's exit status). */
+function isReattachmentLoss(error: string | null): boolean {
+  return error !== null && REATTACHMENT_LOST_ERRORS.some(code => error === code || error.startsWith(`${code}: `));
+}
+
+export const TURN_STARTED_EVENTS = ["turn.submitted", "turn.started", "turn.accepted"];
+export const TURN_SETTLED_EVENTS = ["turn.completed", "turn.failed", "turn.cancelled", "turn.interrupted"];
 
 const asRecord = (value: unknown): Record<string, unknown> =>
   value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -22,7 +29,7 @@ const asRecord = (value: unknown): Record<string, unknown> =>
  * A driver that lost its event stream records `providerTerminalObserved: false`
  * (on the event or its stored PRP source): the real outcome is unknown, and
  * another turn could repeat work that already happened. */
-function isProvenTurnSettlement(event: { eventType: string; payload: unknown }) {
+export function isProvenTurnSettlement(event: { eventType: string; payload: unknown }) {
   if (!TURN_SETTLED_EVENTS.includes(event.eventType)) return false;
   const payload = asRecord(event.payload);
   return payload.providerTerminalObserved !== false &&
@@ -45,8 +52,12 @@ type Outcome = { requested: true; requestId: string } | { requested: false; reas
  */
 export async function requestRestartInterruptedTurnRetry(db: Db, claim: NativeRestartRecoveryClaim): Promise<Outcome> {
   if (claim.kind !== "reattach_remote_runner") return { requested: false, reason: "not_reattachment" };
-  const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, claim.runId));
-  if (!run || run.runtimeMode !== "native" || run.status !== "failed" || !REATTACHMENT_LOST_ERRORS.includes(run.error ?? ""))
+  return requestInterruptedNativeTurnRetry(db, claim.runId);
+}
+
+export async function requestInterruptedNativeTurnRetry(db: Db, runId: string): Promise<Outcome> {
+  const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+  if (!run || run.runtimeMode !== "native" || run.status !== "failed" || !isReattachmentLoss(run.error))
     return { requested: false, reason: "not_reattachment_loss" };
   const context = run.contextSnapshot ?? {};
   const issueId = run.nativeIssueId ?? run.issueId ?? (typeof context.issueId === "string" ? context.issueId : null);

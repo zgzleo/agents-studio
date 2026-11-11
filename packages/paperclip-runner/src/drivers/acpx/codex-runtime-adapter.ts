@@ -45,6 +45,7 @@ import { ACPX_CAPABILITY_PROFILES } from "./capability-profiles.js";
 import { createCursorInstructionAdmission } from "./cursor-instructions.js";
 import { createAntigravityAdmission } from "./antigravity-admission.js";
 import { createAcpxModeBinding } from "./provider-mode.js";
+import { isAcpPromptRequest, type AcpxTurnDispatchJournal } from "./turn-dispatch-journal.js";
 import { assertCopilotPromptPolicy, createCopilotProtocolGuard } from "./copilot-policy.js";
 
 const VERIFIED_COMMAND_SENTINEL = "paperclip-verified-acpx-command";
@@ -76,6 +77,15 @@ const activeCodexRuntimeCleanupOwners = new Set<Promise<unknown>>();
 // minimally provisioned runner. Keep admission finite while allowing the
 // qualified runtime enough time to complete that local handshake.
 const SESSION_HANDSHAKE_TIMEOUT_MS = 30_000;
+
+/**
+ * Pi and Claude get the same 60 s cold session.open bound as the runner's
+ * sidecar and the controller's cold admission budget. A cold Claude handshake
+ * exceeded 30 s on a loaded host; a shorter inner bound would fail first.
+ */
+export function acpxSessionHandshakeTimeoutMs(agent: string): number {
+  return agent === "pi" || agent === "claude" ? 60_000 : SESSION_HANDSHAKE_TIMEOUT_MS;
+}
 
 interface GoalAwareAcpRuntime extends AcpRuntime {
   requestExtension?(input: {
@@ -113,6 +123,8 @@ interface AcpxRuntimeExtensionBoundary {
   active: AcpxRuntimeExtensionTurn | null;
   sessionIds: Set<string>;
   steering: AcpxRuntimeSteeringCapability | null;
+  /** The started turn whose first session/prompt request is not yet written. */
+  promptDispatch: { turn: AcpxRuntimeExtensionTurn; journal: AcpxTurnDispatchJournal } | null;
 }
 
 /**
@@ -317,7 +329,7 @@ export async function openQualifiedAcpxRuntime(
   const extensionNotifications = new Set(extensionProfile.extensionNotifications);
   const promptUsage = options.profile.agent === "grok" ? createGrokPromptUsageCollector() : undefined;
   const extensionBoundary: AcpxRuntimeExtensionBoundary = {
-    active: null, sessionIds: new Set(), steering: null,
+    active: null, sessionIds: new Set(), steering: null, promptDispatch: null,
   };
   const ownsExtensionTurn = (active: AcpxRuntimeExtensionTurn, params: Record<string, unknown>): boolean =>
     extensionBoundary.active === active && !active.signal.aborted
@@ -499,6 +511,13 @@ export async function openQualifiedAcpxRuntime(
     onSessionNotification: acceptGoalNotification,
     onAcpMessage: (direction, message) => {
       const active = extensionBoundary.active;
+      // ACPX calls this synchronously before it writes an outbound message to
+      // the provider stream, so a thrown journal error aborts the prompt write.
+      const dispatch = extensionBoundary.promptDispatch;
+      if (direction === "outbound" && dispatch && dispatch.turn === active && isAcpPromptRequest(message)) {
+        extensionBoundary.promptDispatch = null;
+        dispatch.journal.markDispatched();
+      }
       if (active && (direction === "inbound" || !active.signal.aborted)) promptUsage?.observe(direction, message);
     },
     spawnEnvironment: () => ({
@@ -543,6 +562,7 @@ export async function openQualifiedAcpxRuntime(
 
   let handle: AcpRuntimeHandle | null = null;
   const ensuredSession = Promise.resolve()
+    .then(() => options.restoringSession ? undefined : resetAbandonedBootstrapRecord(baseStore, options.providerSessionKey))
     .then(() =>
       runtime.ensureSession({
         sessionKey: options.providerSessionKey,
@@ -647,7 +667,7 @@ export async function openQualifiedAcpxRuntime(
   try {
     const boundedHandshake = boundedSessionHandshake(
       handshake,
-      dependencies.sessionHandshakeTimeoutMs ?? SESSION_HANDSHAKE_TIMEOUT_MS,
+      dependencies.sessionHandshakeTimeoutMs ?? acpxSessionHandshakeTimeoutMs(options.profile.agent),
     );
     handle = options.signal
       ? await raceRuntimeHandshakeWithAbort(boundedHandshake, options.signal)
@@ -1116,6 +1136,24 @@ function nonEmptyRuntimeIdentity(
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+/**
+ * A fresh open has no runner-recorded provider identity, so a saved record for
+ * its session key was left by an earlier bootstrap of the same session that
+ * stopped before any prompt (for example a session.open the controller gave up
+ * on). Its provider session was never used and may not be resumable: Claude
+ * saves nothing until the first prompt. Ask ACPX to start a new session instead
+ * of reusing it. A record that holds any conversation is left unchanged.
+ */
+export async function resetAbandonedBootstrapRecord(store: AcpSessionStore, sessionKey: string): Promise<boolean> {
+  const record = await store.load(sessionKey);
+  if (!record || record.acpx?.reset_on_next_ensure === true) return false;
+  // Only a record that provably holds no conversation qualifies.
+  if (!Array.isArray(record.messages) || record.messages.length > 0 || record.lastSeq !== 0 ||
+      record.lastPromptAt !== undefined) return false;
+  await store.save({ ...record, acpx: { ...record.acpx, reset_on_next_ensure: true } });
+  return true;
+}
+
 async function boundedSessionHandshake(
   handshake: Promise<AcpRuntimeHandle>,
   timeoutMs: number,
@@ -1524,6 +1562,8 @@ function runtimePort(
       if (providerProcessLost) throw new AcpxProviderProcessLostError();
       assertPromptPolicy?.(input.text);
       if (extensionBoundary.active) throw new Error("ACPX runtime already has an active turn");
+      // Record the turn before any provider work can send its prompt.
+      const dispatchJournal = input.dispatchJournal?.markReceived() ? input.dispatchJournal : null;
       const approval = new AbortController();
       const controller = new AbortController();
       const providerDeath = new AbortController();
@@ -1535,6 +1575,7 @@ function runtimePort(
         onPlanProposal: input.onPlanProposal,
       };
       extensionBoundary.active = extensionTurn;
+      extensionBoundary.promptDispatch = dispatchJournal ? { turn: extensionTurn, journal: dispatchJournal } : null;
       promptUsage?.begin(input.requestId, identity.backendSessionId);
       // A guardian can outlive the provider while ACP awaits a callback.
       // Native exit or a typed ACP agent disconnect retires this turn; losing
@@ -1557,6 +1598,7 @@ function runtimePort(
         stopWatchingProviderExit();
         controller.abort(new Error("ACPX extension turn expired"));
         if (extensionBoundary.active === extensionTurn) extensionBoundary.active = null;
+        if (extensionBoundary.promptDispatch?.turn === extensionTurn) extensionBoundary.promptDispatch = null;
       };
       permissionBoundary.hasAdmittedTurn = true;
       permissionBoundary.active = approval;

@@ -1,7 +1,7 @@
 name: Agents Studio sync verification
 on:
   push:
-    branches: [sync/20261106-2f35eb108]
+    branches: [sync/20261111-bc453342e, main]
 permissions:
   contents: read
 concurrency:
@@ -11,7 +11,7 @@ jobs:
   verify:
     name: ${{ matrix.label }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       max-parallel: 19
@@ -19,6 +19,31 @@ jobs:
         include:
           - label: typecheck-build
             command: "node scripts/typecheck-low-memory.mjs\npnpm build"
+          - label: inventory-policy
+            command: |
+              node scripts/check-as-sync-coverage.mjs
+              pnpm --filter @paperclipai/db check:migrations
+              pnpm check:tokens
+              pnpm check:token-gates
+              pnpm test:release-registry
+          - label: test-program-typecheck
+            command: "node scripts/typecheck-test-programs.mjs --low-memory"
+          - label: test-project-typecheck
+            command: "node scripts/typecheck-test-projects.mjs --low-memory"
+          - label: sandbox-providers
+            command: "node scripts/test-sandbox-providers.mjs"
+          - label: runner-support
+            command: "pnpm test:e2e:runner:unit"
+          - label: runner-static
+            command: "pnpm --filter @paperclipai/paperclip-runner check:static"
+          - label: runner-rust
+            command: "pnpm --filter @paperclipai/paperclip-runner check:runner"
+          - label: runner-package-1
+            command: "pnpm --filter @paperclipai/paperclip-runner test:typescript:vitest --package-lane=1/3"
+          - label: runner-package-2
+            command: "pnpm --filter @paperclipai/paperclip-runner test:typescript:vitest --package-lane=2/3"
+          - label: runner-package-3
+            command: "pnpm --filter @paperclipai/paperclip-runner test:typescript:vitest --package-lane=3/3"
           - label: server-0
             command: "pnpm test:run:general -- --group general-server-without-chat-or-native-runner --shard-index 0 --shard-count 8"
           - label: server-1
@@ -74,6 +99,9 @@ jobs:
           - label: chat-1
             command: "pnpm test:run:general -- --group general-chat --shard-index 1 --shard-count 2"
     env:
+      # Qualification is first-attempt only. A manual rerun has separate evidence.
+      PAPERCLIP_VITEST_RETRY: '0'
+      RUSTUP_TOOLCHAIN: '1.97.1'
       PAPERCLIP_TELEMETRY_DISABLED: '1'
       DO_NOT_TRACK: '1'
       PAPERCLIP_TEST_POSTGRES_RESERVED_PORTS: '3100,54329'
@@ -95,6 +123,12 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/as-sync-cargo"
           printf 'CARGO_HOME=%s/as-sync-cargo\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - name: Prepare isolated test configuration
+        run: |
+          mkdir -p "$RUNNER_TEMP/as-sync-home" "$RUNNER_TEMP/as-sync-config"
+          printf 'PAPERCLIP_HOME=%s/as-sync-home\nPAPERCLIP_CONFIG=%s/as-sync-config/config.json\n' "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt
       - name: Install fixed dependencies
         run: pnpm install --frozen-lockfile
       # Server fixtures use both the development daemon path and release cargo builds.
@@ -119,4 +153,22 @@ jobs:
       - name: Verify assigned complete scope
         env:
           CARGO_NET_OFFLINE: ${{ (startsWith(matrix.label, 'server-') || startsWith(matrix.label, 'native-runner-')) && 'true' || 'false' }}
-        run: ${{ matrix.command }}
+        shell: bash
+        run: |
+          mkdir -p .as-sync-evidence
+          printf '%s\n' "$GITHUB_SHA" > .as-sync-evidence/revision.txt
+          cat > "$RUNNER_TEMP/as-sync-verify.sh" <<'VERIFY'
+          set -euo pipefail
+          ${{ matrix.command }}
+          VERIFY
+          set -o pipefail
+          bash "$RUNNER_TEMP/as-sync-verify.sh" 2>&1 | tee .as-sync-evidence/verification.log
+      - name: Preserve each verification attempt
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: as-sync-${{ github.sha }}-${{ matrix.label }}-attempt-${{ github.run_attempt }}
+          path: .as-sync-evidence/
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 30

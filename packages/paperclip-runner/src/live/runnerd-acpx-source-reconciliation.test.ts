@@ -47,7 +47,7 @@ async function fixture(agent: "codex" | "claude" = "codex", nativeSource = false
     binding: { companyId: nativeIdentity.companyId, agentId: nativeIdentity.agentId, issueId: nativeIdentity.issueId, runId: identity.runId, executionWorkspaceId: "workspace" },
     task: { identifier: "TASK-1", title: "Complete fake work", description: null, prompt: "Complete fake work", workMode: "standard" },
     workspace: { cwd: root, repoUrl: null, repoRef: null, branchName: null },
-    session: { normalizedSessionId: identity.normalizedSessionId, driverKind: "acpx_runtime", protocolVersion: 1 },
+    session: { normalizedSessionId: identity.normalizedSessionId, driverKind: "acpx_runtime", protocolVersion: 1, lifecyclePolicy: { mode: "per_turn", idleTimeoutMs: null } },
     provider: { kind: "acpx", agent, model: "explicit-source-model", permissionPolicy: "interactive", profile: resolveQualifiedAcpxProfile(agent, "explicit-source-model") },
     completionContract: { id: "contract", sha256: sha("contract"), schemaVersion: "paperclip.completion-contract.v1",
       contract: { revision: "1", objective: "Complete fake work", criteria: [{ id: "objective", requirement: "Complete fake work" }] } }, interactionResponses: [], credentialBindings: [] };
@@ -147,7 +147,7 @@ it.skipIf(process.platform === "win32")("recovers and adopts ACPX through the re
       environment: { PAPERCLIP_WORKSPACE_CWD: f.root }, dynamicTools: [] });
     let recovered = await backend().recoverSession!(f.nativeSnapshot!, { signal: new AbortController().signal });
     expect(recovered.recovered).toBe(true);
-    const pid = source.evidence().runnerPid, startedAt = source.transport.processInfo().startedAt;
+    const pid = source.evidence().runnerPid, startedAt = source.transport.processInfo!().startedAt;
     expect(await f.count("turn.start")).toBe(1); expect(await f.count("processStart")).toBe(2);
     await recovered.session!.detachControllerForRestart!();
     const launch = vi.fn(() => { throw new Error("duplicate source launch"); });
@@ -197,7 +197,7 @@ it.skipIf(process.platform === "win32").each(["codex", "claude", "adopt", "pause
     await expect(source.transport.request("turn/start", {})).rejects.toThrow("source_attachment_pending");
     const pid = source.evidence().runnerPid;
     if (mode === "adopt") {
-      const startedAt = source.transport.processInfo().startedAt;
+      const startedAt = source.transport.processInfo!().startedAt;
       await source.detachControllerForRestart();
       const launch = vi.fn(() => { throw new Error("duplicate source launch"); });
       source = f.recover({ runnerProcessLauncher: launch, authorizeRunnerAdoption: async () => { throw new Error("old source configuration"); },
@@ -294,3 +294,40 @@ it.skipIf(process.platform === "win32")("settles an ACPX read tail through ordin
     expect(await f.count("processStart")).toBe(3);
   } finally { await f.cleanup(); }
 }, 30_000);
+
+// A turn start cut off in flight (here: the sidecar dies mid-start). The
+// sidecar's dispatch journal decides what the controller's next turn/start
+// may do: resend once when the prompt never left, refuse when it may have.
+it.skipIf(process.platform === "win32").each(["before", "after"] as const)("resends an ACPX turn whose start was cut off %s its prompt left, only when the journal proves it", async stage => {
+  const f = await fixture("claude");
+  try {
+    const source = f.recover({ authorityRunId: f.identity.runId });
+    expect((await source.transport.request("thread/read", {})).thread).toMatchObject(f.thread);
+    await f.settle();
+    await writeFile(f.fault, stage === "before" ? "hang-before-dispatch" : "hang-after-dispatch");
+    const journal = join(f.root, "acpx", "paperclip-turn-dispatch.jsonl");
+    const sidecar = (await f.calls()).filter(entry => entry.processStart).at(-1)!.processStart as number;
+    const cut = source.transport.request("turn/start", { input: [{ type: "text", text: "Write the brief." }] })
+      .then(() => null, (error: unknown) => error);
+    await vi.waitFor(async () => {
+      const phases = (await readFile(journal, "utf8")).trim().split("\n").map(line => JSON.parse(line).phase);
+      expect(phases).toEqual(stage === "before" ? ["received"] : ["received", "dispatched"]);
+    }, { timeout: 10_000 });
+    kill(sidecar);
+    expect(String(await cut)).toContain(stage === "before" ? "before its prompt reached the provider" : "failed closed");
+    await writeFile(f.fault, "");
+    const startsBefore = await f.count("turn.start");
+    if (stage === "before") {
+      await f.complete(source); await f.settle();
+      expect(await f.count("turn.start")).toBe(startsBefore + 1);
+    } else {
+      await expect(source.transport.request("turn/start", { input: [{ type: "text", text: "Write the brief." }] }))
+        .rejects.toThrow("ACPX session is not open");
+      expect(await f.count("turn.start")).toBe(startsBefore);
+    }
+  } catch (error) {
+    const diagnostics = (await readFile(join(f.root, "native.stderr"), "utf8").catch(() => ""))
+      + (await readFile(join(f.root, "diagnostics", "runnerd.stderr.log"), "utf8").catch(() => ""));
+    throw new Error(`${String(error)}\n${diagnostics}`, { cause: error });
+  } finally { await f.cleanup(); }
+}, 60_000);

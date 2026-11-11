@@ -29,6 +29,19 @@ describe("agent permissions service", () => {
     expect(normalizeAgentPermissions([]).canCreateAgents).toBe(false);
   });
 
+  it("reports a CEO's hiring authority unless the board recorded a denial", () => {
+    expect(normalizeAgentPermissions({}, { role: "ceo" }).canCreateAgents).toBe(true);
+    expect(normalizeAgentPermissions(undefined, { role: "ceo" }).canCreateAgents).toBe(true);
+    expect(normalizeAgentPermissions({ canCreateAgents: false }, { role: "ceo" }).canCreateAgents).toBe(true);
+    const denial = { actorType: "user", actorId: "board-user", at: "2026-11-08T00:00:00.000Z" };
+    expect(normalizeAgentPermissions({ canCreateAgents: false, ceoHiringDeniedBy: denial }, { role: "ceo" }))
+      .toMatchObject({ canCreateAgents: false, ceoHiringDeniedBy: denial });
+    expect(normalizeAgentPermissions({ canCreateAgents: true, ceoHiringDeniedBy: denial }, { role: "ceo" })).not.toHaveProperty("ceoHiringDeniedBy");
+    expect(normalizeAgentPermissions({ canCreateAgents: false, ceoHiringDeniedBy: { actorType: "forged" } }, { role: "ceo" }).canCreateAgents).toBe(true);
+    expect(normalizeAgentPermissions({ trustPreset: LOW_TRUST_REVIEW_PRESET }, { role: "ceo" }).canCreateAgents).toBe(false);
+    expect(normalizeAgentPermissions({}, { role: "engineer" }).canCreateAgents).toBe(false);
+  });
+
   it("withholds agent-creation authority from new low-trust agents", () => {
     expect(defaultAgentPermissions({ lowTrust: true, context: "create" }).canCreateAgents).toBe(false);
     expect(
@@ -117,6 +130,17 @@ describe("agent permissions service", () => {
 
 
 describe("Codex project confirmation permission", () => {
+  it.each(["create", "stored"] as const)("keeps CEO denial independent from the Codex opt-in in %s context", context => {
+    const denial = { actorType: "user", actorId: "owner", at: "2026-11-11T00:00:00.000Z" };
+    const interactions = { canConfigureOtherAgents: false, canReceiveConfigurationChangesFromAgents: false };
+    expect(normalizeAgentPermissions({
+      canCreateAgents: false, ceoHiringDeniedBy: denial, codexProjectTaskAutoApprove: true, interactions,
+    }, { role: "ceo", context })).toMatchObject({
+      canCreateAgents: false, ceoHiringDeniedBy: denial, interactions,
+      codexProjectTaskAutoApprove: context === "stored",
+    });
+  });
+
   it("defaults off and refuses hiring-time injection", () => {
     expect(normalizeAgentPermissions({}).codexProjectTaskAutoApprove).not.toBe(true);
     expect(normalizeAgentPermissions({ codexProjectTaskAutoApprove: "true" }).codexProjectTaskAutoApprove).toBe(false);
