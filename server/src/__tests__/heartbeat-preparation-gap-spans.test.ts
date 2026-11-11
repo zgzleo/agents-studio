@@ -11,6 +11,7 @@ import { instanceSettingsService } from "../services/instance-settings.js";
 import { closeIdleWarmNativeSessionsForRestart } from "../services/native-runtime/native-session-executor.js";
 import { nativeRestartFixture, waitForCondition } from "./helpers/native-restart-fixture.js";
 import { getRecoveryPostgresSupport } from "./helpers/recovery-postgres-fixture.js";
+import { expectPreparationSpanParents } from "./helpers/preparation-span-assertions.js";
 
 const support = await getRecoveryPostgresSupport({});
 
@@ -120,11 +121,7 @@ describe.skipIf(!support.supported)("heartbeat preparation gap spans", () => {
         "native.controller.state_migration",
       ];
       for (const name of [...preparation, ...controller]) expect(names, name).toContain(name);
-      const attempts = spans.filter(span => span.name === "task.execution_attempt");
-      expect(attempts).toHaveLength(1);
-      for (const span of spans.filter(span => preparation.includes(span.name))) {
-        expect(span.parentSpanContext?.spanId, span.name).toBe(attempts[0]!.spanContext().spanId);
-      }
+      expectPreparationSpanParents(spans, preparation);
     } finally {
       await heartbeat.drainActiveRunExecutions();
       await closeIdleWarmNativeSessionsForRestart();

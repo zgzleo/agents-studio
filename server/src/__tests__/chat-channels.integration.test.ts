@@ -243,6 +243,7 @@ import { PaperclipRunnerToolAuthority } from "../services/native-runtime/papercl
 import { NativeChatAttachmentReadScope } from "../services/native-runtime/chat-attachment-read.js";
 import { logActivity } from "../services/activity-log.js";
 import * as activityLogService from "../services/activity-log.js";
+import * as servicesIndex from "../services/index.js";
 import { subscribeCompanyLiveEvents } from "../services/live-events.js";
 import { issueThreadInteractionService } from "../services/issue-thread-interactions.js";
 import { questionResponseDeliveryService } from "../services/question-response-delivery.js";
@@ -66323,6 +66324,12 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
 
   it("retries the saved board-message turn in a connected task after environment qualification failed before provider startup", async () => {
     const f = await failedChatRetryFixture("github", "42", true, false, true);
+    // HTTP Retry nudges admission after responding. Hold that real nudge so
+    // this case deterministically edits the source before admission, rather
+    // than racing a legitimate adoption of the still-unedited message.
+    let releaseRetryAdmission!: () => void;
+    const retryAdmissionGate = new Promise<void>(resolve => { releaseRetryAdmission = resolve; });
+    const retryNudges: Promise<void>[] = [];
     try {
       const companyId = f.fixture.companyId, agentId = f.fixture.assignedAgentId, issueId = f.issue.id;
       await initializeRunIdentity(db, { companyId, runId: f.runId, issueId, responsibleUserId: "owner-user",
@@ -66363,7 +66370,18 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       const app = express();
       app.use(express.json());
       app.use((req, _res, next) => { req.actor = boardActor(companyId); next(); });
-      app.use("/api", issueRoutes(db, createStorageService().storage, { chatRunRetries: f.service }));
+      const routeHeartbeat = vi.spyOn(servicesIndex, "heartbeatService").mockImplementationOnce((...args) => {
+        const service = heartbeatService(...args);
+        return { ...service, resumeTaskRetry: (...retryArgs) => {
+          const nudge = retryAdmissionGate.then(() => service.resumeTaskRetry(...retryArgs));
+          retryNudges.push(nudge);
+          return nudge;
+        } };
+      });
+      try {
+        app.use("/api", issueRoutes(db, createStorageService().storage, { chatRunRetries: f.service }));
+        expect(routeHeartbeat).toHaveBeenCalledTimes(1);
+      } finally { routeHeartbeat.mockRestore(); }
       app.use(errorHandler);
       const denySource = async (apply: () => Promise<unknown>, restore: () => Promise<unknown>, stale = false) => {
         try {
@@ -66426,6 +66444,9 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       await db.update(agents).set({ status: "running" }).where(eq(agents.id, agentId));
       const [dispatchCapacity] = await db.insert(heartbeatRuns).values({ companyId, agentId, status: "running" }).returning();
       await db.update(issueComments).set({ body: "Changed after Retry acceptance", updatedAt: new Date() }).where(eq(issueComments.id, comment.id));
+      expect(retryNudges).toHaveLength(1);
+      releaseRetryAdmission();
+      await Promise.all(retryNudges);
       await heartbeat.resumeExecutionWaitComments();
       expect((await readAgentWakeupRequestsById(retry.id))[0]).toMatchObject({ status: "deferred_issue_execution", runId: null });
       await db.update(issueComments).set({ body: comment.body, updatedAt: sql`${issueComments.createdAt}` }).where(eq(issueComments.id, comment.id));
@@ -66525,6 +66546,8 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       } finally { secondProbe.mockRestore(); await heartbeat.drainActiveRunExecutions(); }
 
     } finally {
+      releaseRetryAdmission();
+      await Promise.allSettled(retryNudges);
       await db.update(agentWakeupRequests).set({ status: "failed", finishedAt: new Date() }).where(and(
         eq(agentWakeupRequests.companyId, f.fixture.companyId), eq(agentWakeupRequests.reason, "task_retry"),
         eq(agentWakeupRequests.status, "deferred_issue_execution")));

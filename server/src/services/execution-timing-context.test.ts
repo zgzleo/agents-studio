@@ -7,8 +7,9 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { getStartupTraceContext, getStartupTracer } from "../instrumentation.js";
 import { prepareVerifiedRemoteProviderPack } from "./native-runtime/remote-provider-pack.js";
 import { createNativeRunTrace } from "./native-runtime/native-run-trace.js";
-import { beginRunPhase, createRunPreparationTiming, getRunExecutionTraceContext, measureRunPhase, measureToolDiscovery, withRunExecutionTiming } from "./execution-preparation-timing.js";
+import { beginRunPhase, createRunPreparationTiming, drainRunPreparationPhases, getRunExecutionTraceContext, measureRunPhase, measureToolDiscovery, withRunExecutionTiming } from "./execution-preparation-timing.js";
 import { createToolDiscoveryScheduler } from "./tool-discovery-scheduler.js";
+import { expectPreparationSpanParents } from "../__tests__/helpers/preparation-span-assertions.js";
 
 let exporter: InMemorySpanExporter;
 let provider: TracerProvider;
@@ -111,6 +112,63 @@ it("uses a link for a native session whose queue history predates the current at
   expect(session.links.map(link => link.context.spanId)).toContain(attempt.spanContext().spanId);
   expect(response.parentSpanContext?.spanId).toBe(attempt.spanContext().spanId);
   expect(session.startTime[0]).toBeLessThan(attempt.startTime[0]);
+});
+
+it.each([49, 50, 75])("keeps immediate and historical preparation parents distinct at %i ms", async durationMs => {
+  const runId = `preparation-replay-${durationMs}`;
+  const name = "heartbeat.prepare.chat_retry_admission";
+  let now = Date.now();
+  const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+  try {
+    await withRunExecutionTiming(runId, async () => {
+      await createRunPreparationTiming(runId)("chat_retry_admission", () => { now += durationMs; });
+      const phases = drainRunPreparationPhases(runId);
+      expect(phases).toHaveLength(durationMs >= 50 ? 1 : 0);
+      // Mirror dispatch: replay retained preparation phases under task.prepare.
+      const native = createNativeRunTrace({ runId });
+      const preparation = native.start("task.prepare", { parentName: "task.provider_session" });
+      for (const phase of phases) await native.record({ ...phase, parentName: "task.prepare" }, { deferRunLog: true });
+      await native.end(preparation);
+      await native.finish("ok");
+    });
+  } finally {
+    clock.mockRestore();
+    drainRunPreparationPhases(runId);
+  }
+  await provider.forceFlush();
+  const spans = exporter.getFinishedSpans();
+  const sameName = spans.filter(span => span.name === name);
+  expect(sameName).toHaveLength(durationMs >= 50 ? 2 : 1);
+  expectPreparationSpanParents(spans, [name]);
+
+  const attempt = spans.find(span => span.name === "task.execution_attempt")!;
+  // The former name-only assertion fails deterministically at the 50 ms boundary.
+  const formerAssertion = () => {
+    for (const span of sameName) expect(span.parentSpanContext?.spanId).toBe(attempt.spanContext().spanId);
+  };
+  if (durationMs >= 50) expect(formerAssertion).toThrow();
+  else expect(formerAssertion).not.toThrow();
+
+  // Filtering must not turn missing immediate coverage into an empty-set pass.
+  expect(() => expectPreparationSpanParents(spans.filter(span =>
+    span.name !== name || span.instrumentationScope.name !== "paperclip.heartbeat-preparation"), [name])).toThrow();
+  const immediate = sameName.find(span => span.instrumentationScope.name === "paperclip.heartbeat-preparation")!;
+  const wrongImmediate = Object.create(immediate) as typeof immediate;
+  Object.defineProperty(wrongImmediate, "parentSpanContext", { value: attempt.parentSpanContext });
+  expect(() => expectPreparationSpanParents(spans.map(span => span === immediate ? wrongImmediate : span), [name])).toThrow();
+  const wrongTrace = Object.create(immediate) as typeof immediate;
+  Object.defineProperty(wrongTrace, "parentSpanContext", { value: { ...attempt.spanContext(), traceId: "0".repeat(32) } });
+  expect(() => expectPreparationSpanParents(spans.map(span => span === immediate ? wrongTrace : span), [name])).toThrow();
+  const unknownScope = Object.create(immediate) as typeof immediate;
+  Object.defineProperty(unknownScope, "instrumentationScope", { value: { name: "unrecognized.preparation" } });
+  // Keep the valid immediate span too: an unknown duplicate must not be ignored.
+  expect(() => expectPreparationSpanParents([...spans, unknownScope], [name])).toThrow();
+  if (durationMs >= 50) {
+    const historical = sameName.find(span => span.instrumentationScope.name === "paperclip.native-runner")!;
+    const wrongHistorical = Object.create(historical) as typeof historical;
+    Object.defineProperty(wrongHistorical, "parentSpanContext", { value: attempt.spanContext() });
+    expect(() => expectPreparationSpanParents(spans.map(span => span === historical ? wrongHistorical : span), [name])).toThrow();
+  }
 });
 
 it("keeps queued discovery under its initiating run when another run releases the slot", async () => {
