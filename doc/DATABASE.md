@@ -297,8 +297,10 @@ in the first lines of the migration file:
 
 Use `requires_staging` in place of `online_compatible` when the previous
 release cannot run against the migration. The justification is mandatory. The
-override is read only from the migration file, so it is reviewed with the SQL
-and travels with it. A contract migration (for example the `DROP COLUMN` that
+ordinary override is read from the migration file, so it is reviewed with the SQL
+and travels with it. The sole historical exception is the immutable 0467 repair:
+its external staging declaration requires the exact basename or canonical
+repository path and original SHA-256; any other path or bytes do not qualify. A contract migration (for example the `DROP COLUMN` that
 follows an expand release) always classifies as `requires_staging`; mark it
 `online_compatible` this way once no running release uses the column.
 `requires_staging` does not fail the pull request yet; it prints a notice.
@@ -313,9 +315,21 @@ pnpm exec tsx scripts/migration-compatibility.ts --check    # the pull-request g
 ```
 
 The guard runs in `check:migrations` (so in the `@paperclipai/db` typecheck and
-build) against the merge base with `origin/master`, and in the pull-request
+build) against the first available migration-bearing merge base in
+`origin/main`, `origin/master`, `main`, `master` order. This keeps a fork with a
+current main from comparing against a stale master tracking ref. An explicit
+`--base <ref>` is authoritative: an unavailable explicit base fails rather than
+falling back. The guard also runs in the pull-request
 policy job through `.github/scripts/check-pr-migration-order.mjs`. Migrations
 that were already on `master` when the classifier shipped are not annotated.
+
+The paired 0466/0467 project environment migration requires staging: stop the
+previous release before the drop/repair sequence and use the normal executor
+that preserves the old environment associations. The classifier applies this legacy declaration only for the exact file name
+and original SHA-256. The published SQL and the executor's repair hash must
+not change, even to add comments. A hash mismatch remains a blocking error.
+The declaration does not make its validated foreign key online-safe or remove
+the table-lock risk; unnamed SQL classification remains conservative.
 
 Deployers read the result from the cloud migrator manifest
 (`cloud-migrators/v1/<sha>/manifest.json`, built by

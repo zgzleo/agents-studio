@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -375,4 +376,37 @@ describe("the shipped migrations", () => {
       ["0466_drop_project_environment.sql", "requires_staging"],
     ]);
   }, 60_000);
+});
+
+
+
+describe("checksum-qualified project environment staging declaration", () => {
+  const fileName = "0467_fair_human_torch.sql";
+  const sql = readFileSync(new URL("./migrations/" + fileName, import.meta.url), "utf8");
+  it("preserves both published overlap-pair SQL hashes and executor checks", () => {
+    const executor = readFileSync(new URL("./client.ts", import.meta.url), "utf8");
+    for (const [file, key] of [["0466_drop_project_environment.sql", "dropSha256"], [fileName, "repairSha256"]]) {
+      const expected = executor.match(new RegExp(key + ': "([a-f0-9]{64})"'))?.[1];
+      expect(expected).toBeDefined();
+      expect(createHash("sha256").update(readFileSync(new URL("./migrations/" + file, import.meta.url))).digest("hex")).toBe(expected);
+    }
+  });
+  it("only qualifies the exact name and hash and preserves the raw lock hazard", () => {
+    const result = classifyMigrationSequence([sql], [], [fileName])[0];
+    expect(result.compatibility).toBe("requires_staging");
+    expect(result.classified).toBe("unknown");
+    expect(result.reasons.some(reason => reason.code === "lock_hazard_validated_foreign_key")).toBe(true);
+    expect(classifyMigrationSql(sql).compatibility).toBe("unknown");
+    expect(classifyMigrationSequence([sql], [], ["another.sql"])[0].compatibility).toBe("unknown");
+    const guard = checkNewMigrationCompatibility([{ fileName, sql }]);
+    expect(guard.passed).toBe(true); expect(guard.notices.join("\n")).toContain("requires_staging");
+  });
+  it("rejects modified bytes even when only a comment or newline changed", () => {
+    for (const changed of [sql + "\n", "-- comment\n" + sql, 'SELECT 1;']) {
+      const result = classifyMigrationSequence([changed], [], [fileName])[0];
+      expect(result.compatibility).toBe("unknown");
+      expect(result.overrideError).toContain("qualified SHA-256");
+      expect(checkNewMigrationCompatibility([{ fileName, sql: changed }]).passed).toBe(false);
+    }
+  });
 });

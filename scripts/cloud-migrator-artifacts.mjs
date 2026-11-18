@@ -76,12 +76,12 @@ function packedMigrations(dbBytes) {
 /**
  * Whether each packed migration can be applied while the previous release is
  * still running. `classify` is classifyMigrationSequence from @paperclipai/db:
- * it takes the SQL of every migration in apply order. The overrides it honours
- * come only from the packed SQL itself.
+ * it takes SQL in apply order plus exact file names. Overrides come from packed
+ * SQL or the classifier's checksum-qualified legacy staging declaration.
  */
 export function migrationCompatibility(dbBytes, classify) {
   const packed = packedMigrations(dbBytes);
-  const results = classify(packed.map(({ sql }) => sql.toString("utf8")));
+  const results = classify(packed.map(({ sql }) => sql.toString("utf8")), [], packed.map(({ tag }) => tag + ".sql"));
   if (!Array.isArray(results) || results.length !== packed.length) throw new Error("The classifier did not return one result per migration.");
   return {
     version: 1,

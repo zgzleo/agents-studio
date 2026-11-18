@@ -3,8 +3,10 @@
 //
 // This file is loaded with Node's built-in type stripping by the release and
 // policy scripts, which run before dependencies are installed. Keep it free of
-// imports and of TypeScript syntax that needs transpiling (enums, namespaces,
+// non-builtin imports and of TypeScript syntax that needs transpiling (enums, namespaces,
 // parameter properties).
+
+import { createHash } from "node:crypto";
 
 export type MigrationCompatibility = "online_compatible" | "requires_staging" | "unknown";
 
@@ -455,7 +457,8 @@ type OverrideParse = { readonly override: MigrationCompatOverride | null; readon
 
 /**
  * Reads the override directive from the migration file's leading comment block.
- * Nothing outside the file can supply or change an override.
+ * This parser accepts no external override. The named sequence/guard APIs also
+ * apply the exact-name-and-hash legacy staging qualification below.
  */
 export function parseMigrationCompatOverride(sql: string): OverrideParse {
   const lines = sql.split(/\r?\n/);
@@ -547,10 +550,25 @@ export function collectCreatedTables(sql: string): string[] {
  * Classifies migrations in apply order. Each one is judged knowing the tables
  * that `priorSql` and the earlier entries of `sqls` created.
  */
-export function classifyMigrationSequence(sqls: readonly string[], priorSql: readonly string[] = []): MigrationCompatResult[] {
+// Published overlap-repair SQL is checksum-pinned by the executor. Never edit
+// those bytes to add a classification comment. This declaration can only make
+// the qualified historical migration require staging, never online-compatible.
+function qualifyLegacyStaging(fileName: string | undefined, sql: string, result: MigrationCompatResult): MigrationCompatResult {
+  if (fileName !== "0467_fair_human_torch.sql" && fileName !== "packages/db/src/migrations/0467_fair_human_torch.sql") return result;
+  const sha256 = createHash("sha256").update(sql).digest("hex");
+  if (sha256 !== "50ce0eb2567570b098bea1de92fe6a220d139e4ba83438195fbbad1be51e31a1") {
+    return { ...result, compatibility: "unknown", override: null,
+      overrideError: "The published project environment repair does not match its qualified SHA-256; preserve the original migration bytes." };
+  }
+  return { ...result, compatibility: "requires_staging",
+    override: { compatibility: "requires_staging",
+      justification: "Pause the previous release before the qualified 0466/0467 drop/repair pair. Use the normal executor to preserve environment associations; the validated foreign key can hold table locks. SQL bytes and executor checksums remain unchanged." } };
+}
+
+export function classifyMigrationSequence(sqls: readonly string[], priorSql: readonly string[] = [], fileNames: readonly string[] = []): MigrationCompatResult[] {
   const existingTables = new Set<string>(priorSql.flatMap(collectCreatedTables));
-  return sqls.map((sql) => {
-    const result = classifyMigrationSql(sql, { existingTables });
+  return sqls.map((sql, index) => {
+    const result = qualifyLegacyStaging(fileNames[index], sql, classifyMigrationSql(sql, { existingTables }));
     for (const table of collectCreatedTables(sql)) existingTables.add(table);
     return result;
   });
@@ -612,7 +630,7 @@ export function checkNewMigrationCompatibility(
   const classified = options.priorMigrationSql
     ? classifyMigrationSequence(sqls, options.priorMigrationSql)
     : sqls.map((sql) => classifyMigrationSql(sql));
-  const results = migrations.map(({ fileName }, index) => ({ fileName, result: classified[index] }));
+  const results = migrations.map(({ fileName, sql }, index) => ({ fileName, result: qualifyLegacyStaging(fileName, sql, classified[index]) }));
   for (const { fileName, result } of results) {
     const baseName = fileName.split("/").pop() ?? fileName;
     if (result.usesConcurrently && options.nonTransactionalMigrations && !options.nonTransactionalMigrations.has(baseName)) {

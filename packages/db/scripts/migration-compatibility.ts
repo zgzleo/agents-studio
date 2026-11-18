@@ -7,7 +7,7 @@
 //   tsx scripts/migration-compatibility.ts <file.sql>...   classify the named files
 //   tsx scripts/migration-compatibility.ts --check [--base <ref>]
 //       fail when a migration added since the merge base with <ref>
-//       (default origin/master, then master) is `unknown` without an override
+//       (default origin/main, origin/master, main, then master) is `unknown` without an override
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -47,7 +47,7 @@ function git(args: string[]): string | null {
 
 /** Journal migrations split by whether the merge base has them, or null without git history. */
 function migrationsAddedSince(requestedBase: string | null): { base: string; prior: string[]; files: string[] } | null {
-  for (const ref of requestedBase ? [requestedBase] : ["origin/master", "master"]) {
+  for (const ref of requestedBase ? [requestedBase] : ["origin/main", "origin/master", "main", "master"]) {
     const base = git(["merge-base", "HEAD", ref])?.trim();
     if (!base) continue;
     // ls-tree lists the current directory (the migrations folder) of the base.
@@ -97,11 +97,11 @@ function main(): number {
   // A named file is judged after the journal migrations that precede it, or
   // after the whole journal when it is not in the journal yet.
   const results = named.length === 0
-    ? classifyMigrationSequence(journal.map((input) => input.sql)).map((result, index) => ({ fileName: journal[index].fileName, ...result }))
+    ? classifyMigrationSequence(journal.map((input) => input.sql), [], journal.map((input) => input.fileName)).map((result, index) => ({ fileName: journal[index].fileName, ...result }))
     : named.map(read).map((input) => {
       const position = journal.findIndex((entry) => entry.fileName === input.fileName);
       const prior = (position === -1 ? journal : journal.slice(0, position)).map((entry) => entry.sql);
-      return { fileName: input.fileName, ...classifyMigrationSequence([input.sql], prior)[0] };
+      return { fileName: input.fileName, ...classifyMigrationSequence([input.sql], prior, [input.fileName])[0] };
     });
   if (flag("--json")) {
     console.log(JSON.stringify(results, null, 2));

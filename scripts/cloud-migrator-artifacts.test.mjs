@@ -223,3 +223,14 @@ test("AWS trust is master-only and publication policy cannot overwrite objects",
   assert.ok(workflow.indexOf("uses: actions/attest@") < workflow.indexOf(" publish migrator-artifacts"));
   assert.ok(workflow.indexOf(" verify-install migrator-artifacts") < workflow.indexOf("actions/upload-artifact@"), "the real dependency smoke must pass before artifact upload");
 });
+
+test("packed project environment repair retains original hash and staging qualification", () => {
+  const tag = "0467_fair_human_torch";
+  const sql = readFileSync(new URL("../packages/db/src/migrations/" + tag + ".sql", import.meta.url), "utf8");
+  const row = migrationCompatibility(dbArchive({ [tag]: sql }), classify).migrations[0];
+  assert.equal(row.sqlSha256, "50ce0eb2567570b098bea1de92fe6a220d139e4ba83438195fbbad1be51e31a1");
+  assert.equal(row.compatibility, "requires_staging");
+  assert.equal(row.classified, "unknown");
+  assert.ok(row.reasons.some(reason => reason.code === "lock_hazard_validated_foreign_key"));
+  assert.equal(migrationCompatibility(dbArchive({ [tag]: sql + "\n" }), classify).migrations[0].compatibility, "unknown");
+});

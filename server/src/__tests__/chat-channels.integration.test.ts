@@ -66789,12 +66789,13 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
 
   it("retries the saved board-message turn in a connected task after environment qualification failed before provider startup", async () => {
     const f = await failedChatRetryFixture("github", "42", true, false, true);
-    // HTTP Retry nudges admission after responding. Hold that real nudge so
+    // Hold the selected Retry admission across its bounded HTTP wait so
     // this case deterministically edits the source before admission, rather
     // than racing a legitimate adoption of the still-unedited message.
     let releaseRetryAdmission!: () => void;
     const retryAdmissionGate = new Promise<void>(resolve => { releaseRetryAdmission = resolve; });
     const retryNudges: Promise<void>[] = [];
+    let captureRetryAdmission = false;
     try {
       const companyId = f.fixture.companyId, agentId = f.fixture.assignedAgentId, issueId = f.issue.id;
       await initializeRunIdentity(db, { companyId, runId: f.runId, issueId, responsibleUserId: "owner-user",
@@ -66836,9 +66837,10 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       app.use(express.json());
       app.use((req, _res, next) => { req.actor = boardActor(companyId); next(); });
       const actualHeartbeatService = heartbeatModule.heartbeatService;
-      const routeHeartbeat = vi.spyOn(heartbeatModule, "heartbeatService").mockImplementationOnce((...args) => {
+      const routeHeartbeat = vi.spyOn(heartbeatModule, "heartbeatService").mockImplementation((...args) => {
         const service = actualHeartbeatService(...args);
         return { ...service, resumeTaskRetry: (...retryArgs) => {
+          if (!captureRetryAdmission) return Promise.resolve();
           const nudge = retryAdmissionGate.then(() => service.resumeTaskRetry(...retryArgs));
           retryNudges.push(nudge);
           return nudge;
@@ -66846,7 +66848,7 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       });
       try {
         app.use("/api", issueRoutes(db, createStorageService().storage, { chatRunRetries: f.service }));
-        expect(routeHeartbeat).toHaveBeenCalledTimes(1);
+        expect(routeHeartbeat).toHaveBeenCalledWith(db, { pluginWorkerManager: undefined });
       } finally { routeHeartbeat.mockRestore(); }
       app.use(errorHandler);
       const denySource = async (apply: () => Promise<unknown>, restore: () => Promise<unknown>, stale = false) => {
@@ -66914,8 +66916,10 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       await denySource(async () => {}, () => db.delete(environmentLeases).where(eq(environmentLeases.id, liveLease.id)));
       adapterExecutionControls.set(failed.id, createAdapterExecutionControl());
       await denySource(async () => {}, async () => { adapterExecutionControls.get(failed.id)?.finish(); adapterExecutionControls.delete(failed.id); });
+      captureRetryAdmission = true;
       const idempotencyKey = randomUUID();
       const response = await request(app).post(`/api/issues/${issueId}/retry`).send({ idempotencyKey, observedRunId: current!.id }).expect(202);
+      captureRetryAdmission = false;
       expect(response.body).toMatchObject({ accepted: true, observedRunId: current!.id });
       expect(response.body.chatActionId).toBeUndefined();
       const [retry] = await readAgentWakeupRequestsById(response.body.requestId);

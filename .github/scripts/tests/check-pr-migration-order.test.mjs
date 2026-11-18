@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { checkMigrationCompatibility, checkMigrationOrder } from '../check-pr-migration-order.mjs';
@@ -121,4 +122,18 @@ test('treats CREATE TABLE IF NOT EXISTS as new only when the target branch never
 
   assert.deepEqual(fresh.notices, []);
   assert.match(existing.notices[0], /0231_widgets\.sql: requires_staging/);
+});
+
+test("PR compatibility recognises only the canonical, checksum-qualified repair", async () => {
+  const fileName = migration("0467_fair_human_torch");
+  const sql = readFileSync(new URL("../../../packages/db/src/migrations/0467_fair_human_torch.sql", import.meta.url), "utf8");
+  const result = await checkMigrationCompatibility([{ fileName, sql }]);
+  assert.equal(result.passed, true);
+  assert.match(result.notices.join("\n"), /requires_staging/);
+  const changed = await checkMigrationCompatibility([{ fileName, sql: sql + "\n" }]);
+  assert.equal(changed.passed, false);
+  assert.match(changed.errors.join("\n"), /qualified SHA-256/);
+  for (const wrongPath of ["elsewhere/0467_fair_human_torch.sql", "packages/db/src/migrations/../migrations/0467_fair_human_torch.sql"]) {
+    assert.equal((await checkMigrationCompatibility([{ fileName: wrongPath, sql }])).passed, false);
+  }
 });
