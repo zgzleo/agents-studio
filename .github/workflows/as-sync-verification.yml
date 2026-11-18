@@ -1,7 +1,7 @@
 name: Agents Studio sync verification
 on:
   push:
-    branches: [sync/20261111-bc453342e, main]
+    branches: [sync/20261111-bc453342e, sync/20261118-1c556d5340, main]
 permissions:
   contents: read
 concurrency:
