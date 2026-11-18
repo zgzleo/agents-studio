@@ -10,6 +10,7 @@ import { parseDocumentAnnotationHash } from "@/lib/document-annotation-hash";
 import Markdown, { defaultUrlTransform, type Components, type Options } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { cn } from "../lib/utils";
+import { ANALYTICS_MASK_CLASS } from "@/lib/analytics/privacy";
 import { MarkdownUrlLink } from "./MarkdownUrlLink";
 import { recognizeLinkPreview, type LinkPreviewState } from "@paperclipai/shared";
 import { Link, useCaseHref } from "@/lib/router";
@@ -792,6 +793,10 @@ function MarkdownBodyImpl({
     () => (companies?.length ? companies.map((c) => c.issuePrefix) : undefined),
     [companies],
   );
+  const knownPrefixSet = useMemo(
+    () => (knownPrefixes ? new Set(knownPrefixes.map((prefix) => prefix.toUpperCase())) : undefined),
+    [knownPrefixes],
+  );
   const externalReferenceLookup = useMemo<MarkdownExternalReferenceMap | null>(() => {
     if (!externalReferences) return null;
     const lookup: MarkdownExternalReferenceMap = {};
@@ -900,7 +905,7 @@ function MarkdownBodyImpl({
         );
       }
 
-      const issueRef = linkIssueReferences ? parseIssueReferenceFromHref(href) : null;
+      const issueRef = linkIssueReferences ? parseIssueReferenceFromHref(href, knownPrefixSet) : null;
       const documentHash = href?.includes("#") ? href.slice(href.indexOf("#")) : null;
       const documentLink = Boolean(coordinator && documentHash && parseDocumentAnnotationHash(documentHash));
       if (documentLink && href?.startsWith("#")) {
@@ -1017,13 +1022,15 @@ function MarkdownBodyImpl({
       };
     }
     return map;
-  }, [theme, coordinator, linkIssueReferences, linkCaseReferences, externalReferenceLookup, resolveImageSrc, resolveLinkHref, onImageClick, mediaMode, knownPrefixes]);
+  }, [theme, coordinator, linkIssueReferences, linkCaseReferences, externalReferenceLookup, resolveImageSrc, resolveLinkHref, onImageClick, mediaMode, knownPrefixes, knownPrefixSet]);
 
   return (
     <div
       className={cn(
         "paperclip-markdown prose prose-sm min-w-0 max-w-full break-words overflow-hidden",
         theme === "dark" && "prose-invert",
+        // Customer content: masked in session replay, skipped by autocapture.
+        ANALYTICS_MASK_CLASS,
         className,
       )}
       style={mergeWrapStyle(style)}

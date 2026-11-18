@@ -1,4 +1,4 @@
-import type { PluginWorkspaceParams, PluginWorkspaceResult } from "./workspace-provider.js";
+import type { PluginWorkspaceParams, PluginWorkspacePrepareParams, PluginWorkspacePrepareResult, PluginWorkspaceResult } from "./workspace-provider.js";
 import type { PluginEnvironmentTaskParams, PluginEnvironmentTaskResult } from "./environment-tasks.js";
 import type { PluginAgentRuntimeState, PluginAgentRuntimeIdentity } from "./types.js";
 import type { AgentLifecycleRequest, AgentLifecycleResult } from "@paperclipai/shared";
@@ -485,6 +485,23 @@ export interface ExecuteToolParams {
   parameters: unknown;
   /** Agent run context. */
   runContext: ToolRunContext;
+  /** For a plugin connector tool: the app slug as declared in the manifest. */
+  appSlug?: string;
+}
+
+/**
+ * Input for the `listConnectorTools` RPC method: the tools a dynamic plugin
+ * connector offers for one connection.
+ */
+export interface ListConnectorToolsParams {
+  /** The company of the connection; host calls made while listing are scoped to it. */
+  companyId: string;
+  appSlug: string;
+  connection: import("./types.js").ConnectorToolListConnection;
+}
+
+export interface ListConnectorToolsResult {
+  tools: import("./types.js").ConnectorToolDescriptor[];
 }
 
 export interface PluginExternalObjectUrlCandidate {
@@ -693,6 +710,7 @@ export interface PluginEnvironmentAcquireLeaseParams extends PluginEnvironmentDr
    * lifetime.
    */
   requestedExpiresAt?: string | null;
+  runnerLifecyclePolicy?: { mode: "warm"; idleTimeoutMs: number };
 }
 
 export interface PluginEnvironmentResumeLeaseParams extends PluginEnvironmentDriverBaseParams {
@@ -1445,6 +1463,7 @@ export interface HostToWorkerMethods {
   performAction: [params: PerformActionParams, result: unknown];
   /** @see PLUGIN_SPEC.md §13.10 */
   executeTool: [params: ExecuteToolParams, result: ToolResult];
+  listConnectorTools: [params: ListConnectorToolsParams, result: ListConnectorToolsResult];
   detectExternalObjects: [
     params: DetectExternalObjectsParams,
     result: DetectExternalObjectsResult,
@@ -1462,6 +1481,7 @@ export interface HostToWorkerMethods {
     params: PluginEnvironmentValidateConfigParams,
     result: PluginEnvironmentValidationResult,
   ];
+  workspacePrepare: [params: PluginWorkspacePrepareParams, result: PluginWorkspacePrepareResult];
   workspaceOperation: [params: PluginWorkspaceParams, result: PluginWorkspaceResult];
   environmentTask: [params: PluginEnvironmentTaskParams, result: PluginEnvironmentTaskResult];
   environmentProbe: [
@@ -1586,10 +1606,12 @@ export const HOST_TO_WORKER_OPTIONAL_METHODS: readonly HostToWorkerMethodName[] 
   "handleApiRequest",
   "agentLifecycle",
   "resourceLifecycle",
+  "workspacePrepare",
   "workspaceOperation",
   "getData",
   "performAction",
   "executeTool",
+  "listConnectorTools",
   "detectExternalObjects",
   "routeAiConnection",
   "resolveExternalObject",

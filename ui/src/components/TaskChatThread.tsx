@@ -44,6 +44,10 @@ import {
 } from "@/components/transcript/useLiveRunTranscripts";
 import { useNativeRunTranscripts } from "@/components/transcript/useNativeRunTranscripts";
 import { TaskChatLiveTail } from "@/components/task-chat/TaskChatLiveTail";
+import { McpAppIssueProvider } from "@/components/mcp-app/McpAppIssueContext";
+import { ProviderToolIconsProvider } from "@/components/ProviderToolIcon";
+import { McpAppTurnViews, mcpAppRunRefreshKey } from "@/components/mcp-app/McpAppTurnViews";
+import { ToolCallProgressProvider } from "@/components/task-chat/tool-call-progress";
 import { TaskChatRunnerHeader, TaskChatRunnerTurn } from "@/components/task-chat/TaskChatRunnerTurn";
 import { partitionRunHealthItems } from "@/components/task-chat/TaskChatRunHealthBanner";
 import {
@@ -129,6 +133,7 @@ import { useSidebar } from "@/context/SidebarContext";
 import { useStreamlinedUiEnabled } from "@/hooks/useStreamlinedUiEnabled";
 import { useDismissedTaskQuestions } from "@/hooks/useDismissedTaskQuestions";
 import { cn } from "@/lib/utils";
+import { ANALYTICS_MASK_CLASS } from "@/lib/analytics/privacy";
 import { Button } from "@/components/ui/button";
 import { useIssuePlanDocument } from "@/hooks/useIssuePlanDocument";
 import { isRedundantAiRecoveryNotice, latestSameRunHandoffTimestamp } from "@/lib/issue-chat-messages";
@@ -484,6 +489,14 @@ function durableInputLabel(
     return interaction.title ?? "Review items";
   if (interaction.kind === "connection_intent")
     return interaction.title ?? "Connect service";
+  if (interaction.kind === "suggest_routine")
+    return interaction.title ?? "Routine offer";
+  if (interaction.kind === "propose_responsibility_bar")
+    return interaction.title ?? "Proposed bar";
+  if (interaction.kind === "propose_automation")
+    return interaction.title ?? "Proposed automation";
+  if (interaction.kind === "propose_dashboard_changes")
+    return interaction.title ?? "Proposed dashboard changes";
   if (
     interaction.payload.target?.type === "issue_document" &&
     interaction.payload.target.key === "plan"
@@ -1396,8 +1409,12 @@ export function TaskChatThread(props: TaskChatThreadProps) {
         continue;
       }
       const createdAtMs = toMs(interaction.createdAt);
+      // A routine offer follows the same run's completion message even when
+      // the agent made it before that message was saved.
       const handoffAtMs =
-        interaction.kind === "request_confirmation" && interaction.sourceRunId
+        (interaction.kind === "request_confirmation" || interaction.kind === "suggest_routine"
+          || interaction.kind === "propose_responsibility_bar" || interaction.kind === "propose_automation"
+          || interaction.kind === "propose_dashboard_changes") && interaction.sourceRunId
           ? latestSameRunHandoffTimestamp({
               interactionCreatedAtMs: createdAtMs,
               sourceRunId: interaction.sourceRunId,
@@ -1689,7 +1706,7 @@ export function TaskChatThread(props: TaskChatThreadProps) {
       const historical = statusRelevance.isHistoricalRun(source.id);
       // A workspace admission attempt never started provider work. Its live
       // successor owns the waiting indicator; retain this attempt in the run log.
-      if (source.status === "cancelled" && meta?.errorCode === "workspace_busy") {
+      if (source.status === "cancelled" && (meta?.errorCode === "workspace_busy" || meta?.errorCode === "agent_directory_busy")) {
         settledRunIds.add(source.id);
         continue;
       }
@@ -2782,6 +2799,13 @@ export function TaskChatThread(props: TaskChatThreadProps) {
         (interaction) =>
           interaction.status === "pending" &&
           interaction.kind !== "connection_intent" &&
+          interaction.kind !== "suggest_routine" &&
+          // A proposed bar stays in the conversation; the agent does not wait on it.
+          interaction.kind !== "propose_responsibility_bar" &&
+          // Nor does a proposed automation.
+          interaction.kind !== "propose_automation" &&
+          // Nor do proposed dashboard changes.
+          interaction.kind !== "propose_dashboard_changes" &&
           !(coordinatorEnabled && interaction.kind === "suggest_tasks") &&
           !shouldHideInteractionCard(interaction),
       )
@@ -2927,6 +2951,12 @@ export function TaskChatThread(props: TaskChatThreadProps) {
       }
     },
     [beginSubmission, rejectSubmission, onAdd, pendingComposerInputs, selectedPendingInput, dismissInput, agentMap, takeoverMode],
+  );
+  // A message an MCP Apps view proposed, sent only after the viewer clicked
+  // Send, through the same path as a typed message.
+  const sendMcpAppMessage = useCallback(
+    (body: string, clientRequestId: string) => handleThreadAdd(body, undefined, undefined, undefined, clientRequestId),
+    [handleThreadAdd],
   );
   const optimisticRunnerStartup =
     hasAgentAssignee &&
@@ -3361,6 +3391,9 @@ export function TaskChatThread(props: TaskChatThreadProps) {
 
   return (
     <TaskChatRequestHistoryContext.Provider value={issueId ?? "unknown"}>
+    <McpAppIssueProvider issueId={issueId} sendMessage={composerDisabledReason ? null : sendMcpAppMessage}>
+    <ProviderToolIconsProvider companyId={companyId}>
+    <ToolCallProgressProvider issueId={issueId}>
     <TaskChatExpansionState.Provider value={expansionState.current}>
       <TaskChatScrollReady.Provider value={(historyRevealed || !historyPending || historyWaitExpired) && !scrollTargetPending}>
         <TaskChatPresentationProvider
@@ -3369,6 +3402,8 @@ export function TaskChatThread(props: TaskChatThreadProps) {
           <div
             className={cn(
               "relative flex min-h-0 flex-1 flex-col",
+              // Customer content: masked in session replay, skipped by autocapture.
+              ANALYTICS_MASK_CLASS,
               isMobile && !historyRevealed && "task-chat-history-pending",
             )}
             data-testid="task-chat-thread"
@@ -3534,11 +3569,12 @@ export function TaskChatThread(props: TaskChatThreadProps) {
                                     />
                                   ) : (
                                     <TaskChatShimmerScope items={tailItems}>
+                                      <McpAppTurnViews runId={tailRunId} refreshKey={mcpAppRunRefreshKey(tailItems, tailStatus)} />
                                       <TaskChatLiveTail
                                         items={tailItems}
                                         emptyMessage={
                                           tailStatus === "queued"
-                                            ? "Waiting to start..."
+                                            ? undefined
                                             : (liveRun && liveRun.id === tailRunId
                                                 ? liveRun.currentStatusMessage
                                                 : null) ||
@@ -3707,6 +3743,9 @@ export function TaskChatThread(props: TaskChatThreadProps) {
         </TaskChatPresentationProvider>
       </TaskChatScrollReady.Provider>
     </TaskChatExpansionState.Provider>
+    </ToolCallProgressProvider>
+    </ProviderToolIconsProvider>
+    </McpAppIssueProvider>
     </TaskChatRequestHistoryContext.Provider>
   );
 }

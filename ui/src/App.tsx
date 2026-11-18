@@ -7,6 +7,9 @@ import { Button } from "@/components/ui/button";
 import { useTranslation } from "@/i18n";
 import { Layout } from "./components/Layout";
 import { ConferenceRoomChatGate } from "./components/ConferenceRoomChatGate";
+import { ResponsibilitiesGate } from "./components/ResponsibilitiesGate";
+import { CompanyHomeRedirect } from "./components/CompanyHomeRedirect";
+import { useCompanyHomePath } from "./hooks/useCompanyHomePath";
 import { CasesExperimentalGate } from "./components/CasesExperimentalGate";
 import { StatusCardsExperimentalGate } from "./components/StatusCardsExperimentalGate";
 import { CloudManagedPageGate } from "./components/CloudManagedPageGate";
@@ -20,8 +23,10 @@ import { useHiddenSettings } from "./hooks/useHiddenSettings";
 import { OnboardingWizardVariant } from "./components/OnboardingWizardVariant";
 import { CloudAccessGate } from "./components/CloudAccessGate";
 import { ConnectionStatusBanner } from "./components/ConnectionStatusBanner";
+import { PageLoadTracker } from "./components/PageLoadTracker";
 import { ShellConfigurationGate } from "./components/ShellConfigurationGate";
 import { PaperclipLoading } from "./components/AnimatedPaperclipIcon";
+import { QueryErrorState } from "./components/QueryView";
 import { AGENT_FILTER_TABS } from "./lib/agent-filter-tabs";
 import { useCombinedInboxTasksEnabled } from "./hooks/useCombinedInboxTasksEnabled";
 import { ChatConnectorsExperimentalGate } from "./components/ChatConnectorsExperimentalGate";
@@ -72,6 +77,8 @@ const Agents = lazy(() => import("./pages/Agents").then((module) => ({ default: 
 const Cases = lazy(() => import("./pages/Cases").then((module) => ({ default: module.Cases })));
 const CaseDetail = lazy(() => import("./pages/CaseDetail").then((module) => ({ default: module.CaseDetail })));
 const Dashboard = lazy(() => import("./pages/Dashboard").then((module) => ({ default: module.Dashboard })));
+const Responsibilities = lazy(() => import("./pages/Responsibilities").then((module) => ({ default: module.Responsibilities })));
+const ResponsibilityDetail = lazy(() => import("./pages/ResponsibilityDetail").then((module) => ({ default: module.ResponsibilityDetail })));
 const DashboardLive = lazy(() => import("./pages/DashboardLive").then((module) => ({ default: module.DashboardLive })));
 const Timeline = lazy(() => import("./pages/Timeline").then((module) => ({ default: module.Timeline })));
 const Companies = lazy(() => import("./pages/Companies").then((module) => ({ default: module.Companies })));
@@ -107,6 +114,7 @@ const AdvancedToolsRoute = lazy(() => import("./pages/tools/AdvancedToolsRoute")
 const ProfileWizardRoute = lazy(() => import("./pages/tools/profiles/ProfileWizardRoute").then((module) => ({ default: module.ProfileWizardRoute })));
 const ProfileDetailRoute = lazy(() => import("./pages/tools/profiles/ProfileDetailRoute").then((module) => ({ default: module.ProfileDetailRoute })));
 const Browse = lazy(() => import("./pages/apps/Browse").then((module) => ({ default: module.Browse })));
+const TailscaleConnector = lazy(() => import("./pages/apps/TailscaleConnector").then((module) => ({ default: module.TailscaleConnector })));
 const AppsConnect = lazy(() => import("./pages/apps/AppsConnect").then((module) => ({ default: module.AppsConnect })));
 const ChatEndpointSetup = lazy(() => import("./pages/apps/chat/ChatEndpointSetup").then((module) => ({ default: module.ChatEndpointSetup })));
 const ChatEndpointDetail = lazy(() => import("./pages/apps/chat/ChatEndpointDetail").then((module) => ({ default: module.ChatEndpointDetail })));
@@ -150,8 +158,13 @@ function boardRoutes(streamlinedUiEnabled: boolean, combinedInboxTasksEnabled: b
   const mergedTasks = streamlinedUiEnabled && combinedInboxTasksEnabled;
   return (
     <>
-      <Route index element={<Navigate to="dashboard" replace />} />
+      <Route index element={<CompanyHomeRedirect />} />
       <Route path="dashboard" element={<Dashboard />} />
+      {/* Areas of responsibility (experimental): home when the flag is on. */}
+      <Route element={<ResponsibilitiesGate />}>
+        <Route path="responsibilities" element={<Responsibilities />} />
+        <Route path="responsibilities/:responsibilityId" element={<ResponsibilityDetail />} />
+      </Route>
       <Route path="dashboard/live" element={<DashboardLive />} />
       <Route
         path="timeline"
@@ -198,6 +211,7 @@ function boardRoutes(streamlinedUiEnabled: boolean, combinedInboxTasksEnabled: b
       <Route path="tools" element={<LegacyToolsRedirect />} />
       <Route path="tools/:tab" element={<LegacyToolsRedirect />} />
       <Route path="apps" element={<Browse />} />
+      <Route path="apps/tailscale" element={<TailscaleConnector />} />
       <Route path="apps/assistant-connection" element={<AssistantConnection />} />
       <Route path="apps/browse" element={<Navigate to="/apps" replace />} />
       <Route path="apps/connections" element={<Navigate to="/apps" replace />} />
@@ -646,8 +660,12 @@ export function OnboardingRoutePage() {
 function CompanyRootRedirect() {
   const { companies, selectedCompany, loading } = useCompany();
   const location = useLocation();
+  const home = useCompanyHomePath();
 
-  if (loading) {
+  if (!loading && home.error) {
+    return <QueryErrorState error={home.error} size="page" action="load your settings" onRetry={home.retry} />;
+  }
+  if (loading || !home.loaded) {
     return <PaperclipLoading />;
   }
 
@@ -664,7 +682,7 @@ function CompanyRootRedirect() {
     return <NoCompaniesStartPage />;
   }
 
-  return <Navigate to={`/${targetCompany.issuePrefix}/dashboard`} replace />;
+  return <Navigate to={`/${targetCompany.issuePrefix}${home.path}`} replace />;
 }
 
 function StatusCardsLegacyRedirect() {
@@ -775,10 +793,10 @@ export function App() {
     else if (/^\/[^/]+\/(issues|tasks)\/?$/.test(pathname)) void loadIssues().catch(() => undefined);
   }, [pathname]);
 
-  return (
+  // One route tree for both the router and the page-load measurement, so
+  // every page is measured under its route pattern.
+  const routeTree = (
     <>
-      <ConnectionStatusBanner />
-      <Suspense fallback={<PaperclipLoading />}><Routes>
         <Route path="oauth-handoff" element={<PaperclipCloudOAuthHandoffPage />} />
         <Route path="auth" element={<AuthPage />} />
         <Route path="board-claim/:token" element={<BoardClaimPage />} />
@@ -821,6 +839,8 @@ export function App() {
           <Route path="status-cards" element={<UnprefixedBoardRedirect />} />
           <Route path="status-cards/:cardId" element={<UnprefixedBoardRedirect />} />
           <Route path="artifacts" element={<UnprefixedBoardRedirect />} />
+          <Route path="responsibilities" element={<UnprefixedBoardRedirect />} />
+          <Route path="responsibilities/:responsibilityId" element={<UnprefixedBoardRedirect />} />
           <Route path="audit" element={<UnprefixedBoardRedirect />} />
           {streamlinedUiEnabled ? (
             <>
@@ -870,7 +890,14 @@ export function App() {
           <Route path="*" element={<NotFoundPage scope="global" />} />
           </Route>
         </Route>
-      </Routes></Suspense>
+    </>
+  );
+
+  return (
+    <>
+      <ConnectionStatusBanner />
+      <PageLoadTracker routes={routeTree} />
+      <Suspense fallback={<PaperclipLoading />}><Routes>{routeTree}</Routes></Suspense>
       <OnboardingWizardVariant />
     </>
   );

@@ -153,6 +153,7 @@ fn config(state_dir: &Path) -> DurableRunnerConfig {
         reconnect_grace: None,
         max_runtime: Duration::from_secs(60),
         turn_scoped: false,
+        controller_silence: paperclip_runner_core::durable::DEFAULT_CONTROLLER_SILENCE,
     }
 }
 
@@ -454,10 +455,10 @@ fn prepare_payload_with_mode(directory: &Path, agent: &str, mode: &str) -> Value
             "kind": "acpx",
             "provider": "acpx",
             "driver": "acpx_runtime",
-            "providerVersion": "0.13.1",
+            "providerVersion": "0.22.0",
             "agent": agent,
             "model": "explicit-test-model",
-            "acpxVersion": "0.13.1",
+            "acpxVersion": "0.22.0",
             "agentServerPackage": "@agentclientprotocol/codex-acp",
             "agentServerVersion": "1.6.2",
             "agentRuntimePackage": runtime_package,
