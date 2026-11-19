@@ -80,6 +80,49 @@ it("does not adopt an accepted turn the runner no longer reports active", async 
   }
 }, 60_000);
 
+it.each([
+  { commandType: "session.snapshot", delayMs: 700 },
+  { commandType: "turn.start", delayMs: 2_200 },
+])("keeps a lost turn bounded when its $commandType checkpoint is slow", async ({ commandType, delayMs }) => {
+  const stateDirectory = await mkdtemp(join(tmpdir(), "runnerd-lost-turn-slow-checkpoint-"));
+  const OriginalCore = durableControlPlane.DurablePrpControlPlane;
+  let delayedCheckpoint = false;
+  const coreSpy = vi.spyOn(durableControlPlane, "DurablePrpControlPlane")
+    .mockImplementation(function(options: ConstructorParameters<typeof OriginalCore>[0]) {
+      const core = new OriginalCore(options);
+      core.setCheckpointPersistence(async checkpoint => {
+        const commands = [...checkpoint.records]
+          .filter(([key]) => key.startsWith("command:"))
+          .map(([, value]) => JSON.parse(value));
+        if (!delayedCheckpoint && commands.some(command => command.type === commandType && command.status === "completed")) {
+          delayedCheckpoint = true;
+          // Real persistence can outlive either the turn command budget or
+          // the snapshot probe's reserved last quarter of that budget.
+          await new Promise(resolveWait => setTimeout(resolveWait, delayMs));
+        }
+        await writeFile(join(stateDirectory, "checkpoint.json"), JSON.stringify([...checkpoint.records]));
+      });
+      return core;
+    } as unknown as typeof OriginalCore);
+  const bundle = createCapabilityRunnerdCodexTransport({
+    runnerBinary: defaultCapabilityRunnerdBinary(), codexCommand: fakeCodex,
+    codexArgs: fakeCodexArgs(stateDirectory, "--exit-before-turn-started"),
+    stateDirectory, turnStartTimeoutMs: 2_000,
+  });
+  try {
+    await bundle.transport.request("thread/start", { cwd: tmpdir(), dynamicTools: [] });
+    const started = Date.now();
+    await expect(bundle.transport.request("turn/start", { input: [{ type: "text", text: "Lose this turn." }] }))
+      .rejects.toThrow("runnerd did not report the provider turn identity");
+    expect(delayedCheckpoint).toBe(true);
+    expect(Date.now() - started).toBeLessThan(2_000 + 1_500);
+  } finally {
+    await bundle.transport.close().catch(() => undefined);
+    coreSpy.mockRestore();
+    await rm(stateDirectory, { recursive: true, force: true });
+  }
+}, 60_000);
+
 it("fails a pending turn start at once with the runner's own terminal failure", async () => {
   // The runner can fail an accepted turn before its turn/started arrives
   // (RC-20d: turn_binding_mismatch). That terminal is final, so the start must

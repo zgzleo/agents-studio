@@ -8023,7 +8023,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
           ...(!compactionTurn && this.#providerStartedTurns() ? { providerStartedTurns: true } : {}),
           turnId: pendingTurnId,
         },
-        commandDeadline,
+        commandDeadline, false, "progress-only",
       );
       try { this.options.recordTimingReceipt?.({...record(startResult.timing), roundTripMs:performance.now()-commandStarted}); } catch {}
       const expectedProviderTurnId =
@@ -8113,7 +8113,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
           if (this.#waitNow() >= deadline - adoptionReserveMs && adoptionCheckedFor !== deadline) {
             adoptionCheckedFor = deadline;
             const snapshot = await this.#commandResult(
-              "session.snapshot", {}, deadline,
+              "session.snapshot", {}, deadline, false, "strict",
             ).catch(() => null);
             this.#pumpEventsSafely();
             this.#throwIfFailed();
@@ -8206,13 +8206,14 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
     payload: Record<string, unknown>,
     deadline?: number,
     abortOnClose = false,
+    deadlinePolicy: "progress" | "progress-only" | "strict" = "progress",
   ): Promise<Record<string, unknown>> {
     this.#assertRunWorkAdmission(type);
     const core = this.#core;
     if (core === null) throw new Error("PRP provider thread is not started");
     const commandId = `command_lab_${randomUUID().replaceAll("-", "")}`;
     core.queueCommand(type, payload, commandId, true);
-    await this.#waitCommand(type, commandId, deadline, abortOnClose);
+    await this.#waitCommand(type, commandId, deadline, abortOnClose, deadlinePolicy);
     const command = core.getCommand(commandId);
     if (command?.status !== "completed" || command.type !== type) {
       throw new Error(`PRP command ${type} omitted its durable result`);
@@ -8322,8 +8323,9 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
     commandId?: string,
     deadline = this.#waitNow() + 30_000,
     abortOnClose = false,
+    deadlinePolicy: "progress" | "progress-only" | "strict" = "progress",
   ): Promise<void> {
-    return this.options.measureOperation ? this.options.measureOperation("runner.transport.command_ack", () => this.#waitCommandWork(type, commandId, deadline, abortOnClose)) : this.#waitCommandWork(type, commandId, deadline, abortOnClose);
+    return this.options.measureOperation ? this.options.measureOperation("runner.transport.command_ack", () => this.#waitCommandWork(type, commandId, deadline, abortOnClose, deadlinePolicy)) : this.#waitCommandWork(type, commandId, deadline, abortOnClose, deadlinePolicy);
   }
 
   async #waitCommandWork(
@@ -8331,11 +8333,13 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
     commandId?: string,
     deadline = this.#waitNow() + 30_000,
     abortOnClose = false,
+    deadlinePolicy: "progress" | "progress-only" | "strict" = "progress",
   ): Promise<void> {
     await waitForRunnerCommand({
       type,
       deadline,
       clock: this.#admissionClock,
+      deadlinePolicy,
       abortOnClose,
       isClosed: () => this.#closed,
       throwIfFailed: () => this.#throwIfFailed(),
@@ -10026,6 +10030,8 @@ export async function waitForRunnerCommand(input: {
   deadline: number;
   /** Startup or recovery admission clock; `deadline` was taken from it. */
   clock?: RunnerStallLedger | null;
+  /** Strict probes cannot extend; progress-only waits cannot credit later waits. */
+  deadlinePolicy?: "progress" | "progress-only" | "strict";
   abortOnClose: boolean;
   isClosed: () => boolean;
   throwIfFailed: () => void;
@@ -10065,12 +10071,13 @@ export async function waitForRunnerCommand(input: {
     return false;
   };
   const completeExtended = () => {
+    if (input.deadlinePolicy === "progress-only") return;
     input.clock?.credit(Math.max(0, now() - input.deadline) + RUNNER_POST_STOP_GRACE_MS);
   };
   let observed = false;
-  while (now() < input.deadline || answeredAndAdvancing() || replayAdvancing()) {
+  while (now() < input.deadline || (input.deadlinePolicy !== "strict" && (answeredAndAdvancing() || replayAdvancing()))) {
     observed = true;
-    if (now() >= input.deadline) extended = true;
+    if (input.deadlinePolicy !== "strict" && now() >= input.deadline) extended = true;
     input.throwIfFailed();
     if (input.abortOnClose && input.isClosed()) {
       throw new Error(`runnerd transport closed while waiting for ${input.type}`);

@@ -344,3 +344,55 @@ it("completes a command whose answer arrives during the last sleep before its de
     vi.useRealTimers();
   }
 });
+
+// A liveness probe is not a recovery barrier: unrelated progress cannot buy
+// another window after its enclosing turn-start budget has expired.
+it.each(["answer", "replay"])("does not extend a strict snapshot deadline for %s progress", async progress => {
+  vi.useFakeTimers();
+  const clock = new RunnerStallLedger();
+  try {
+    const rejected = expect(waitForRunnerCommand({
+      type: "session.snapshot", deadline: clock.now() + 100, clock,
+      deadlinePolicy: "strict", abortOnClose: false, isClosed: () => false,
+      throwIfFailed: () => undefined, command: () => pendingCommand(),
+      runnerHasExited: async () => false, failureCode: () => "provider_transport_failed",
+      answeredProgressAt: () => progress === "answer" ? Date.now() : null,
+      replayProgressAt: () => progress === "replay" ? Date.now() : null,
+    })).rejects.toThrow("PRP command session.snapshot timed out");
+    await vi.advanceTimersByTimeAsync(110);
+    await rejected;
+    expect(clock.creditedMs).toBe(0);
+  } finally { vi.useRealTimers(); }
+});
+
+it("does not credit a strict probe when its last iteration crosses the deadline", async () => {
+  const clock = new RunnerStallLedger();
+  const now = vi.spyOn(clock, "now").mockReturnValueOnce(0).mockReturnValueOnce(0).mockReturnValue(101);
+  try {
+    await waitForRunnerCommand({
+      type: "session.snapshot", deadline: 100, clock, deadlinePolicy: "strict",
+      abortOnClose: false, isClosed: () => false, throwIfFailed: () => undefined,
+      command: () => ({ ...pendingCommand(), status: "completed" }),
+      runnerHasExited: async () => false, failureCode: () => "provider_transport_failed",
+    });
+    expect(clock.creditedMs).toBe(0);
+  } finally { now.mockRestore(); }
+});
+
+it("waits for a progress-only command result without crediting the next wait", async () => {
+  vi.useFakeTimers();
+  const clock = new RunnerStallLedger();
+  const command = pendingCommand();
+  try {
+    setTimeout(() => { command.status = "completed"; }, 150);
+    const waited = waitForRunnerCommand({
+      type: "turn.start", deadline: clock.now() + 100, clock, deadlinePolicy: "progress-only",
+      abortOnClose: false, isClosed: () => false, throwIfFailed: () => undefined,
+      command: () => command, runnerHasExited: async () => false,
+      failureCode: () => "provider_transport_failed", replayProgressAt: () => Date.now(),
+    });
+    await vi.advanceTimersByTimeAsync(160);
+    await expect(waited).resolves.toBeUndefined();
+    expect(clock.creditedMs).toBe(0);
+  } finally { vi.useRealTimers(); }
+});
