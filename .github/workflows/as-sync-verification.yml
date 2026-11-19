@@ -22,6 +22,13 @@ jobs:
           - label: inventory-policy
             command: |
               node scripts/check-as-sync-coverage.mjs
+              # This isolated sync is qualified against the deployed baseline,
+              # not a moving branch tip. An absent/unreachable base must fail.
+              if [[ "$GITHUB_REF" == refs/heads/sync/20261118-1c556d5340 ]]; then
+                baseline=c6d22a229955ea1320193c563e218c1047dd593b
+                git merge-base --is-ancestor "$baseline" HEAD
+                pnpm --filter @paperclipai/db exec tsx scripts/migration-compatibility.ts --check --base "$baseline"
+              fi
               pnpm --filter @paperclipai/db check:migrations
               pnpm check:tokens
               pnpm check:token-gates
@@ -112,6 +119,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+          # Only these lanes run the migration compatibility merge-base guard.
+          fetch-depth: ${{ (matrix.label == 'inventory-policy' || matrix.label == 'typecheck-build') && '0' || '1' }}
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86
         with:
           version: 9.15.4

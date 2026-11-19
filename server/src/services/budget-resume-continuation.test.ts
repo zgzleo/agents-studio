@@ -39,9 +39,10 @@ describe.skipIf(!support.supported)("resuming after a budget hard stop", () => {
     await tempDb?.cleanup();
   });
 
+  let scopeSequence = 0;
   async function seedScope(label: string, scopeType: "company" | "agent" = "company") {
     const [company] = await db.insert(companies).values({ name: `Budget ${label}`,
-      issuePrefix: `B${randomUUID().slice(0, 4).toUpperCase()}` }).returning();
+      issuePrefix: `BUDGETRESUME${++scopeSequence}` }).returning();
     const [agent] = await db.insert(agents).values({ companyId: company.id, name: "Worker" }).returning();
     const scopeId = scopeType === "agent" ? agent.id : company.id;
     const [policy] = await db.insert(budgetPolicies).values({ companyId: company.id, scopeType,

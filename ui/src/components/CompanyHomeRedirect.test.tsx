@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, defaultScheduler, notifyManager } from "@tanstack/react-query";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CompanyHomeRedirect } from "./CompanyHomeRedirect";
 import { useCompanyHomePath } from "@/hooks/useCompanyHomePath";
@@ -20,7 +20,17 @@ afterEach(() => {
   teardown?.();
   teardown = null;
   vi.clearAllMocks();
+  notifyManager.setScheduler(defaultScheduler);
 });
+
+// Wait for the observable React commit, not a guessed timer duration. Each
+// poll flushes React work while React Query keeps its real async scheduler.
+async function waitForView(assertion: () => void) {
+  await vi.waitFor(async () => {
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+    assertion();
+  });
+}
 
 async function render(node: React.ReactNode, settle = true) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -28,8 +38,8 @@ async function render(node: React.ReactNode, settle = true) {
   document.body.append(host);
   const root = createRoot(host);
   await act(async () => root.render(<QueryClientProvider client={client}>{node}</QueryClientProvider>));
-  if (settle) await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1)); });
   teardown = () => { act(() => root.unmount()); host.remove(); client.clear(); };
+  if (settle) await waitForView(() => expect(host.childElementCount).toBeGreaterThan(0));
   return host;
 }
 
@@ -58,7 +68,8 @@ describe("CompanyHomeRedirect", () => {
     experimental.getExperimental.mockReturnValue(new Promise((done) => { resolve = done; }));
     const host = await render(<CompanyHomeRedirect />, false);
     expect(host.querySelector('[data-testid="navigate"]')).toBeNull();
-    await act(async () => { resolve({ enableResponsibilities: true }); await new Promise((done) => setTimeout(done, 1)); });
+    await act(async () => { resolve({ enableResponsibilities: true }); });
+    await waitForView(() => expect(host.querySelector('[data-testid="navigate"]')?.getAttribute("data-to")).toBe("/responsibilities"));
     expect(host.querySelector('[data-testid="navigate"]')?.getAttribute("data-to")).toBe("/responsibilities");
   });
 });
@@ -71,7 +82,8 @@ describe("when the settings cannot be read", () => {
     expect(host.querySelector('[data-query-view="error"]')).not.toBeNull();
     experimental.getExperimental.mockResolvedValue({ enableResponsibilities: true });
     const retry = [...host.querySelectorAll("button")].find((button) => button.textContent?.includes("Retry"))!;
-    await act(async () => { retry.click(); await new Promise((done) => setTimeout(done, 1)); });
+    await act(async () => { retry.click(); });
+    await waitForView(() => expect(host.querySelector('[data-testid="navigate"]')?.getAttribute("data-to")).toBe("/responsibilities"));
     expect(host.querySelector('[data-testid="navigate"]')?.getAttribute("data-to")).toBe("/responsibilities");
   });
 });
@@ -83,5 +95,23 @@ describe("useCompanyHomePath", () => {
     const probe = host.querySelector("span");
     expect(probe?.getAttribute("data-path")).toBe("/dashboard");
     expect(probe?.getAttribute("data-loaded")).toBe("false");
+  });
+});
+
+
+it("does not redirect until the resolved flag notification is delivered", async () => {
+  const notifications: Array<() => void> = [];
+  notifyManager.setScheduler(callback => { notifications.push(callback); });
+  let resolve!: (value: { enableResponsibilities: boolean }) => void;
+  experimental.getExperimental.mockReturnValue(new Promise(done => { resolve = done; }));
+  const host = await render(<CompanyHomeRedirect />, false);
+  await act(async () => { resolve({ enableResponsibilities: true }); });
+  expect(notifications.length).toBeGreaterThan(0);
+  expect(host.querySelector('[data-testid="navigate"]')).toBeNull();
+  await act(async () => { for (const notify of notifications.splice(0)) notify(); });
+  await waitForView(() => {
+    expect(host.querySelectorAll('[data-testid="navigate"]')).toHaveLength(1);
+    expect(host.querySelector('[data-testid="navigate"]')?.getAttribute("data-to")).toBe("/responsibilities");
+    expect(host.querySelector('[data-testid="navigate"]')?.getAttribute("data-replace")).toBe("true");
   });
 });

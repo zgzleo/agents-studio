@@ -24,16 +24,24 @@ try {
  if (fs.existsSync(source)) {
   for (const relative of ['.claude', '.claude/skills']) {
    const target = path.join(cwd, relative);
-   if (fs.existsSync(target)) { const st = fs.lstatSync(target); if (st.isSymbolicLink() || !st.isDirectory()) throw Error('Unsafe Grok skills directory'); }
-   else { fs.mkdirSync(target); created.push({path:relative,kind:'directory'}); }
+   try { fs.mkdirSync(target); created.push({path:relative,kind:'directory'}); }
+   catch (error) { if (error.code !== 'EEXIST') throw error; }
+   const st = fs.lstatSync(target);
+   if (st.isSymbolicLink() || !st.isDirectory()) throw Error('Unsafe Grok skills directory');
   }
   for (const name of fs.readdirSync(source)) {
    if (path.basename(name) !== name) throw Error('Invalid skill name');
    const relative = path.join('.claude', 'skills', name), target = path.join(cwd, relative);
-   if (fs.existsSync(target)) continue;
-   fs.mkdirSync(target);
+   // mkdir is the exclusive ownership claim, including dangling symlinks.
+   try { fs.mkdirSync(target); } catch (error) { if (error.code === 'EEXIST') continue; throw error; }
    created.push({path:relative,kind:'skill'});
-   fs.cpSync(path.join(source,name),target,{recursive:true,force:false,errorOnExist:true});
+   const skillSource = path.join(source,name), st = fs.lstatSync(skillSource);
+   if (st.isSymbolicLink() || !st.isDirectory()) throw Error('Unsafe Grok source skill');
+   // Node 24 rejects cp onto the directory we just claimed with errorOnExist.
+   // Copy its children exclusively instead; never relax no-overwrite.
+   for (const child of fs.readdirSync(skillSource)) {
+    fs.cpSync(path.join(skillSource,child),path.join(target,child),{recursive:true,force:false,errorOnExist:true});
+   }
   }
  }
  const rules = fs.existsSync(path.join(assets,'Agents.md')) ? path.join(assets,'Agents.md')

@@ -42,3 +42,46 @@ it.each(["existing", "new", "unsafe", "changed"])("keeps %s project files safe w
     }
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 });
+
+
+it.each(["same-name", "dangling-skill", "copy-failure", "concurrent"])("preserves ownership for %s staging", async scenario => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "grok-ownership-"));
+  try {
+    const cwd = path.join(root, "workspace"), assets = path.join(root, "assets");
+    const skill = path.join(cwd, ".claude/skills/selected");
+    const source = path.join(assets, ".claude/skills/selected");
+    await fs.mkdir(cwd);
+    await fs.mkdir(source, { recursive: true });
+    await fs.writeFile(path.join(source, "SKILL.md"), "runtime");
+    await fs.mkdir(path.join(source, "nested"));
+    await fs.writeFile(path.join(source, "nested/data"), "nested");
+    if (scenario === "same-name") {
+      await fs.mkdir(skill, { recursive: true });
+      await fs.writeFile(path.join(skill, "SKILL.md"), "user");
+    }
+    if (scenario === "dangling-skill") {
+      await fs.mkdir(path.dirname(skill), { recursive: true });
+      await fs.symlink(path.join(root, "missing"), skill);
+    }
+    if (scenario === "copy-failure") {
+      // A FIFO cannot be copied: exercise rollback after ownership is acquired.
+      const { execFileSync } = await import("node:child_process");
+      execFileSync("mkfifo", [path.join(source, "unsupported-fifo")]);
+    }
+    const input = { runId: "fixture", target: { kind: "local" as const }, cwd, assets };
+    if (scenario === "copy-failure") {
+      await expect(prepareGrokRemoteProjectAssets(input)).rejects.toThrow("Could not prepare");
+      await expect(fs.lstat(path.join(cwd, ".claude"))).rejects.toMatchObject({ code: "ENOENT" });
+      return;
+    }
+    const prepared = scenario === "concurrent"
+      ? await Promise.all([prepareGrokRemoteProjectAssets(input), prepareGrokRemoteProjectAssets(input)])
+      : [await prepareGrokRemoteProjectAssets(input)];
+    if (scenario === "dangling-skill") expect((await fs.lstat(skill)).isSymbolicLink()).toBe(true);
+    else expect(await fs.readFile(path.join(skill, "SKILL.md"), "utf8")).toBe(scenario === "same-name" ? "user" : "runtime");
+    if (scenario === "concurrent") expect(await fs.readFile(path.join(skill, "nested/data"), "utf8")).toBe("nested");
+    for (const entry of prepared) await entry.cleanup();
+    if (scenario === "same-name") expect(await fs.readFile(path.join(skill, "SKILL.md"), "utf8")).toBe("user");
+    if (scenario === "dangling-skill") expect((await fs.lstat(skill)).isSymbolicLink()).toBe(true);
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
