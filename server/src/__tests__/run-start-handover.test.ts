@@ -7,6 +7,8 @@ import { DATABASE_WORK_CHANNEL, enableDatabaseWorkNotifications, receiveDatabase
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { DELIVERY_QUEUES } from "../services/delivery-work-notifications.js";
 import { createDeliveryWorkCoordinator } from "../services/delivery-work-coordinator.js";
+import { registerRunDispatchWork } from "../services/heartbeat/dispatch-work.js";
+import { notifyRunDispatch } from "../services/run-dispatch-notifications.js";
 import { readTaskDrain, startTaskDrain, stopTaskDrain } from "../services/task-admission.js";
 import { createRunStartHandover, isRunStartHandoverActive, isYieldingRunStarts, refreshRunStartYieldIfStale,
   registerRunStartHandover, type RunStartHandover } from "../services/run-start-handover.js";
@@ -21,6 +23,7 @@ type Server = {
   name: string;
   db: ReturnType<typeof createDb>;
   handover: RunStartHandover;
+  coordinator: ReturnType<typeof createDeliveryWorkCoordinator>;
   resumed: ReturnType<typeof vi.fn>;
   dispatchHints: number;
   stop: () => Promise<void>;
@@ -69,7 +72,7 @@ suite("run start hand-over between an old and a new server during a deploy overl
     const handover = createRunStartHandover({ db, coordinator, canDispatch, onResume: resumed, bootId: `boot-${name}-${randomUUID()}`,
       processSpace: name, pid: 1, timing: { ...timing, ...options.timing } });
     await handover.ready;
-    const server: Server = { name, db, handover, resumed, dispatchHints: 0, stop: async () => {} };
+    const server: Server = { name, db, handover, coordinator, resumed, dispatchHints: 0, stop: async () => {} };
     const unsubscribe = subscribeDatabaseWork(db, DELIVERY_QUEUES.queuedRunDispatch, event => {
       if (event === "settled") server.dispatchHints += 1;
     });
@@ -127,9 +130,16 @@ suite("run start hand-over between an old and a new server during a deploy overl
     expect(await marker(next)).toMatchObject({ live: true });
     await vi.waitFor(() => expect(old.handover.isActive()).toBe(true), { timeout: 10_000 });
 
+    // Entering yield already sends a hint. This assertion tests a later skip,
+    // not a second notification inside the configured throttle window.
+    await vi.waitFor(() => expect(next.dispatchHints).toBeGreaterThan(0), { timeout: 10_000 });
     const handedOver = await queueRun();
     const hintsBefore = next.dispatchHints;
-    expect(await dispatch(old, handedOver)).toBe(false);
+    const wallNow = Date.now.bind(Date);
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => wallNow() + timing.skipHintMinMs);
+    try {
+      expect(await dispatch(old, handedOver)).toBe(false);
+    } finally { clock.mockRestore(); }
     // The skipped start wakes the new server's queued-run dispatch instead of waiting for a sweep.
     await vi.waitFor(() => expect(next.dispatchHints).toBeGreaterThan(hintsBefore), { timeout: 10_000 });
     expect(await dispatch(next, handedOver)).toBe(true);
@@ -138,6 +148,66 @@ suite("run start hand-over between an old and a new server during a deploy overl
     // The old server's SIGTERM ends the hand-over; the new server stops renewing without further writes.
     await admin.update(controllerInstances).set({ stoppedAt: sql`now()` }).where(eq(controllerInstances.processSpace, "old"));
     await vi.waitFor(() => expect(next.handover.isHandingOver()).toBe(false), { timeout: 10_000 });
+  });
+
+  it("dispatches a committed new run even when a skipped start's hint is throttled", async () => {
+    const skipHintMinMs = 60_000;
+    const old = await bootServer("old", { timing: { skipHintMinMs } });
+    await old.handover.begin();
+    const next = await bootServer("new");
+    let completedPasses = 0;
+    const passes = async () => {
+      const queued = await next.db.select({ id: heartbeatRuns.id }).from(heartbeatRuns)
+        .where(eq(heartbeatRuns.status, "queued"));
+      for (const run of queued) await dispatch(next, run.id);
+      completedPasses += 1;
+    };
+    const work = registerRunDispatchWork(next.coordinator, {
+      promoteDueScheduledRetries: async () => undefined,
+      nextScheduledRetryAt: async () => null,
+      schedulingSuppressed: async () => false,
+      resumeQueuedRunsAfterDrain: passes,
+      listUndispatchedQueuedRuns: async () => [],
+    }, () => true);
+    let release!: () => void;
+    const commit = new Promise<void>(resolve => { release = resolve; });
+    let pending: Promise<unknown> | undefined;
+    try {
+      await work.ready;
+      const beforeHandover = completedPasses;
+      await next.handover.begin();
+      await vi.waitFor(() => expect(old.handover.isActive()).toBe(true), { timeout: 10_000 });
+      const yieldingAt = Date.now();
+      // Consume the first hint against an empty queue before admitting a new run.
+      await vi.waitFor(() => expect(completedPasses).toBeGreaterThan(beforeHandover), { timeout: 10_000 });
+      const hintsBefore = next.dispatchHints;
+      expect(hintsBefore).toBeGreaterThan(0);
+      const runId = randomUUID();
+      let inserted!: () => void;
+      const insertion = new Promise<void>(resolve => { inserted = resolve; });
+      pending = old.db.transaction(async tx => {
+        // The production queue registers this notification in the enqueue transaction.
+        await notifyRunDispatch(tx, { companyId, runId });
+        await tx.insert(heartbeatRuns).values({ id: runId, companyId, agentId, status: "queued", invocationSource: "on_demand" });
+        inserted();
+        await commit;
+      });
+      await insertion;
+      expect(await dispatch(old, runId)).toBe(false);
+      expect(Date.now() - yieldingAt).toBeLessThan(skipHintMinMs);
+      expect(next.dispatchHints).toBe(hintsBefore);
+      expect(claims.filter(claim => claim.runId === runId)).toEqual([]);
+      release();
+      await pending;
+      await vi.waitFor(() => expect(claims.filter(claim => claim.runId === runId))
+        .toEqual([{ server: "new", runId }]), { timeout: 10_000 });
+      expect(next.dispatchHints).toBe(hintsBefore + 1);
+      expect(Date.now() - yieldingAt).toBeLessThan(skipHintMinMs);
+    } finally {
+      release();
+      await pending;
+      await work.stop();
+    }
   });
 
   it("the old server learns of the hand-over on its next start even without a notification", async () => {
